@@ -1,0 +1,24 @@
+{
+  "sku": "UGREEN-ROBOT-65W",
+  "name": "Ugreen Uno Robot 65W GaN Fast Charger",
+  "category": "tech",
+  "physical_specs": {
+    "wattage": "65W",
+    "ports": "2x USB-C, 1x USB-A",
+    "display": "TFT mini LED robot face",
+    "color": "Matte black with purple boots"
+  },
+  "hero_image_path": "assets/ugreen_charger_hero.png",
+  "creator_reference_path": null,
+  "verified_claims": [
+    "Sạc nhanh 65W chuẩn GaN cho laptop và điện thoại",
+    "Màn hình biểu cảm thông minh báo trạng thái sạc",
+    "Thiết kế robot mini độc đáo với giày bảo vệ chân cắm"
+  ],
+  "prohibited_terms": [
+    "cháy nổ",
+    "hàng dỏm",
+    "rẻ tiền"
+  ],
+  "language": "vi"
+}

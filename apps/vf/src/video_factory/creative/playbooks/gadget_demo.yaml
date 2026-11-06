@@ -1,0 +1,12 @@
+version: gadget-demo-v1
+prerequisites: [visible_controls]
+use_situation: Clear a small desk before leaving.
+visual_hook: One supported physical interaction makes the use case legible.
+action_patterns: [place the documented device in its holder, handle a visible control]
+continuity: Preserve SKU, hands, orientation, accessories and desk.
+immutable_traits: [port count, control position, logo, model geometry]
+forbidden: [invented port, performance proof from synthetic video, invented accessory]
+qc_criteria: [exact model, contact on visible landmark, stable geometry, action progress]
+repair_strategies: [use the matching port reference, simplify interaction, block missing source]
+good_example: Put the real accessory into its documented holder.
+bad_example: Connect a cable to a port absent from all source images.

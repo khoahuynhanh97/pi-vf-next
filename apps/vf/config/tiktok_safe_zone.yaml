@@ -1,0 +1,54 @@
+# TikTok, Reels & Shorts 9:16 Safe Zone & Dead Zone Layout Specification
+platforms:
+  tiktok:
+    aspect_ratio: "9:16"
+    safe_zone:
+      x_min: 0.08
+      x_max: 0.82
+      y_min: 0.12
+      y_max: 0.76
+    dead_zones:
+      right_action_bar:
+        x_min: 0.82
+        x_max: 1.00
+        y_min: 0.35
+        y_max: 0.82
+        description: "Follow, Like, Comment, Bookmark, Share icons"
+        mitigation: "Shift action leftward, maintain subject within X∈[0.08,0.78]"
+      bottom_overlay:
+        x_min: 0.00
+        x_max: 1.00
+        y_min: 0.78
+        y_max: 1.00
+        description: "Username, caption, hashtags, audio title, search bar"
+        mitigation: "Raise subject framing upward, keep critical motion above Y=0.76"
+      top_header:
+        x_min: 0.00
+        x_max: 1.00
+        y_min: 0.00
+        y_max: 0.10
+        description: "Following/For You tabs, Live icon, Search button"
+        mitigation: "Lower camera framing downward, keep critical motion below Y=0.12"
+
+  reels:
+    aspect_ratio: "9:16"
+    safe_zone:
+      x_min: 0.08
+      x_max: 0.82
+      y_min: 0.10
+      y_max: 0.80
+    dead_zones:
+      right_action_bar:
+        x_min: 0.84
+        x_max: 1.00
+        y_min: 0.40
+        y_max: 0.85
+        description: "Like, comment, share, audio icons"
+        mitigation: "Shift action leftward, keep within X∈[0.08,0.80]"
+      bottom_overlay:
+        x_min: 0.00
+        x_max: 1.00
+        y_min: 0.80
+        y_max: 1.00
+        description: "Account handle, description caption, music ticker"
+        mitigation: "Raise framing upward above Y=0.78"

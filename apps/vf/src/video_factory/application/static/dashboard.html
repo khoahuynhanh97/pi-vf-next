@@ -1,0 +1,111 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Hermes Operator — Video Pipeline</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<style>
+  .col::-webkit-scrollbar { height: 6px; width: 6px; }
+  .col::-webkit-scrollbar-thumb { background: #334155; border-radius: 3px; }
+  .card-enter { animation: slide-in .35s ease-out; }
+  @keyframes slide-in {
+    from { opacity: 0; transform: translateY(-8px) scale(.98); }
+    to   { opacity: 1; transform: none; }
+  }
+  .modal-open { animation: fade .2s ease-out; }
+  @keyframes fade { from { opacity: 0 } to { opacity: 1 } }
+</style>
+</head>
+<body class="bg-slate-950 text-slate-100 min-h-screen antialiased">
+
+<header class="sticky top-0 z-20 border-b border-slate-800 bg-slate-950/90 backdrop-blur">
+  <div class="mx-auto max-w-[1800px] px-6 py-4 flex items-center gap-4">
+    <div class="flex items-center gap-3">
+      <h1 class="text-lg font-semibold tracking-tight">
+        🎬 Hermes <span class="text-slate-500 font-normal">/</span> Operator
+      </h1>
+      <div class="hidden sm:flex items-center gap-2 text-xs ml-4">
+        <a href="/products" class="px-2.5 py-1 rounded-md bg-slate-800 text-slate-300 hover:text-white hover:bg-slate-700 font-medium transition">🛒 1. Chọn Sản Phẩm &amp; Tạo Video</a>
+        <a href="/dashboard" class="px-2.5 py-1 rounded-md bg-blue-600 text-white font-medium">🎬 2. Theo Dõi &amp; Duyệt Cổng (Kanban)</a>
+      </div>
+    </div>
+    <div class="ml-auto flex items-center gap-3 text-xs">
+      <span id="status" class="px-2 py-1 rounded bg-slate-800 text-slate-400">connecting…</span>
+      <button id="refresh" class="px-3 py-1 rounded bg-slate-800 hover:bg-slate-700 transition">Refresh</button>
+    </div>
+  </div>
+</header>
+
+<main class="mx-auto max-w-[1800px] px-6 py-6">
+  <div id="board" class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-6 gap-4"></div>
+</main>
+
+<!-- Detail / HITL modal -->
+<div id="modal" class="hidden fixed inset-0 z-40 bg-black/70 overflow-y-auto">
+  <div class="mx-auto max-w-5xl my-10 rounded-xl bg-slate-900 border border-slate-800 shadow-2xl">
+    <div class="flex items-start justify-between px-6 py-4 border-b border-slate-800">
+      <div>
+        <h2 id="m-title" class="text-lg font-semibold">Workflow</h2>
+        <p id="m-sub" class="text-xs text-slate-500 mt-1"></p>
+      </div>
+      <button id="m-close" class="text-slate-400 hover:text-slate-100 text-xl leading-none">✕</button>
+    </div>
+
+    <div class="px-6 py-5 space-y-6">
+      <!-- Visual Pipeline Stepper (n8n-style graph) -->
+      <section class="rounded-xl bg-slate-950/60 border border-slate-800 p-4">
+        <h3 class="text-xs font-semibold uppercase tracking-wider text-slate-400 mb-3 flex items-center gap-2">
+          <span>⚡</span> Workflow Execution Graph
+        </h3>
+        <div id="m-pipeline" class="flex flex-wrap items-center gap-2 text-xs"></div>
+      </section>
+
+      <!-- Grounded Source Images (Grounded Assets) -->
+      <section>
+        <h3 class="text-sm font-semibold text-slate-300 mb-2">📸 Grounded Reference Images (Ảnh Sản Phẩm Thu Thập Được)</h3>
+        <div id="m-grounded-images" class="grid grid-cols-2 sm:grid-cols-4 md:grid-cols-6 gap-3"></div>
+      </section>
+
+      <!-- Grounded dossier -->
+      <section>
+        <h3 class="text-sm font-semibold text-slate-300 mb-2">📚 Grounded Dossier &amp; Script</h3>
+        <div id="m-dossier" class="rounded-lg bg-slate-800/50 p-4 text-sm space-y-2"></div>
+      </section>
+
+      <!-- Scene / keyframe grid -->
+      <section>
+        <div class="flex items-center justify-between mb-2">
+          <h3 class="text-sm font-semibold text-slate-300">🎞️ Keyframes &amp; Scenes Studio</h3>
+          <span class="text-[11px] text-slate-500">Xem video từng scene &amp; chọn render lại scene lỗi</span>
+        </div>
+        <div id="m-scenes" class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3"></div>
+      </section>
+
+      <!-- QC scorecard -->
+      <section>
+        <h3 class="text-sm font-semibold text-slate-300 mb-2">🎯 QC Scorecard</h3>
+        <div id="m-qc" class="grid grid-cols-1 sm:grid-cols-3 gap-3"></div>
+      </section>
+
+      <!-- Approvals -->
+      <section>
+        <h3 class="text-sm font-semibold text-slate-300 mb-2">📋 Approval history</h3>
+        <div id="m-approvals" class="text-xs text-slate-400 space-y-1"></div>
+      </section>
+    </div>
+
+    <div class="sticky bottom-0 border-t border-slate-800 bg-slate-900 px-6 py-4 flex items-center gap-3">
+      <textarea id="m-feedback" rows="2" placeholder="Rework feedback (used by Request Rework)"
+                class="flex-1 rounded-lg bg-slate-800 px-3 py-2 text-sm outline-none focus:ring-1 focus:ring-sky-500"></textarea>
+      <button id="m-approve" class="px-4 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-500 font-medium">✅ Approve &amp; Advance</button>
+      <button id="m-rework" class="px-4 py-2 rounded-lg bg-amber-600 hover:bg-amber-500 font-medium">🔄 Request Rework</button>
+    </div>
+  </div>
+</div>
+
+<div id="toast" class="hidden fixed bottom-6 right-6 z-50 rounded-lg px-4 py-3 text-sm bg-slate-800 border border-slate-700"></div>
+
+<script src="/operator/assets/dashboard.js"></script>
+</body>
+</html>

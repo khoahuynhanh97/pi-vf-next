@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<rss xmlns:ht="https://trends.google.com/trends/trendingsearches/daily" version="2.0">
+  <channel>
+    <item><title>robot hút bụi thông minh</title><ht:news_item><ht:news_item_title>Robot hút bụi mới</ht:news_item_title><ht:news_item_url>https://news.test/robot</ht:news_item_url></ht:news_item></item>
+    <item><title>camera wifi trong nhà</title><ht:news_item><ht:news_item_title>Camera gia đình</ht:news_item_title><ht:news_item_url>https://news.test/camera</ht:news_item_url></ht:news_item></item>
+  </channel>
+</rss>

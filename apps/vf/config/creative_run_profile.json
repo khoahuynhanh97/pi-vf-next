@@ -1,0 +1,24 @@
+{
+  "category": "gadget_demo",
+  "visible_details": [
+    "visible_controls"
+  ],
+  "max_scenes": 4,
+  "image_call_limit": 24,
+  "video_call_limit": 12,
+  "profile": {
+    "provider_kind": "google_flow",
+    "image_provider_kind": "google_flow",
+    "version": "Omni 1.1 Flash",
+    "duration_options": [
+      8
+    ],
+    "image_modes": [
+      "reference"
+    ],
+    "max_reference_images": 1,
+    "supports_end_frame": false,
+    "supports_negative_prompt": false,
+    "audio_policy": "silent"
+  }
+}

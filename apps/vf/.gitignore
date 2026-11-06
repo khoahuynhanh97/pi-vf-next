@@ -1,0 +1,28 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Test and coverage caches
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Local runtime outputs and scratch workspaces
+output/
+workspace/
+data/
+*.mp4
+*.mp3
+*.wav
+
+# IDE / OS files
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

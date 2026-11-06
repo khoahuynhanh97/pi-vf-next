@@ -1,0 +1,24 @@
+{
+  "sku": "LUMIS-HA-SERUM-30ML",
+  "name": "LUMIS Hyaluronic Dew Glow Drops Serum",
+  "category": "beauty",
+  "physical_specs": {
+    "volume": "30ml",
+    "bottle": "Frosted amber glass dropper bottle",
+    "texture": "Translucent viscous hydrating serum",
+    "cap": "Matte gold dropper pipette"
+  },
+  "hero_image_path": "assets/lumis_serum_hero.png",
+  "creator_reference_path": "assets/lumis_creator_ref.png",
+  "verified_claims": [
+    "Cấp ẩm sâu 72 giờ với phức hợp 5 loại Hyaluronic Acid",
+    "Làm dịu tức thì làn da khô căng thiếu sức sống",
+    "Lớp finish căng bóng glowy chuẩn tự nhiên"
+  ],
+  "prohibited_terms": [
+    "trị dứt điểm mọi loại mụn",
+    "thần dược",
+    "lột tẩy da"
+  ],
+  "language": "vi"
+}

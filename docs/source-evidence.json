@@ -1,0 +1,413 @@
+{
+  "verification_date": "2026-11-03",
+  "timezone": "Asia/Bangkok",
+  "scope": "Read-only source audit and new design documents; no application implementation or live generation.",
+  "repos": {
+    "PI": {
+      "root": "D:\\work\\Personal\\Product-Intelligence",
+      "head": "5b9c642be74ec248bd9085c62a79bde96c89307e",
+      "dirty": true,
+      "status_entry_count": 92,
+      "note": "HEAD alone does not identify this working tree; selected source hashes recorded below."
+    },
+    "VF": {
+      "root": "D:\\work\\video-factory",
+      "head": "1416e15ba76003320e6d1247ccbfd01494bcbfbb",
+      "dirty": true,
+      "status_entry_count": 436,
+      "note": "HEAD alone does not identify this working tree; selected source hashes recorded below."
+    }
+  },
+  "sources": [
+    {
+      "source": "PI",
+      "path": "D:\\work\\Personal\\Product-Intelligence\\AGENTS.md",
+      "sha256": "44e787df172509a9a7d03f01a762c86c06286ef6ceeee4da6822fc0531495726",
+      "lines": 41
+    },
+    {
+      "source": "PI",
+      "path": "D:\\work\\Personal\\Product-Intelligence\\README.md",
+      "sha256": "7998e32b72e3648493865bb3dfecb56ace78956bb1627b32e6056d22c051b57c",
+      "lines": 33
+    },
+    {
+      "source": "PI",
+      "path": "D:\\work\\Personal\\Product-Intelligence\\pyproject.toml",
+      "sha256": "3bc689db31d8b16959f9f7180ecaf9de5d95f5d6c3139c27fc43023a8514c8c0",
+      "lines": 31
+    },
+    {
+      "source": "PI",
+      "path": "D:\\work\\Personal\\Product-Intelligence\\docs\\sheet-selection-agent.md",
+      "sha256": "37f9f889f448fffb2c3f42e91ed894b262ee7fe58a1bc406cadf7701cbab0ff8",
+      "lines": 187
+    },
+    {
+      "source": "PI",
+      "path": "D:\\work\\Personal\\Product-Intelligence\\docs\\spaiauto-flow.md",
+      "sha256": "49896ce934754523419f4bb7ac7fdc3b0849e122d7d6a725646fee1546f3d11f",
+      "lines": 390
+    },
+    {
+      "source": "PI",
+      "path": "D:\\work\\Personal\\Product-Intelligence\\tools\\sheet_daily.py",
+      "sha256": "eccf8ea360eff58b8140b17c35b51693d43106e88bfa89b64326503d61ff8b1e",
+      "lines": 77
+    },
+    {
+      "source": "PI",
+      "path": "D:\\work\\Personal\\Product-Intelligence\\tools\\sheet_snapshot.py",
+      "sha256": "e5129ba94a5882deb721af5fad63b3a001a42754b14de0e0222abd920e97d27f",
+      "lines": 76
+    },
+    {
+      "source": "PI",
+      "path": "D:\\work\\Personal\\Product-Intelligence\\tools\\sheet_selection_agent.py",
+      "sha256": "bdba9982ec931a7f36b83f231a0028102700739472018d8c4556d9ae6e3a4416",
+      "lines": 125
+    },
+    {
+      "source": "PI",
+      "path": "D:\\work\\Personal\\Product-Intelligence\\tools\\selection_handoff.py",
+      "sha256": "4cd027badc57c9807b80002467fca83187b64697594b8f4de874fd57791618c6",
+      "lines": 453
+    },
+    {
+      "source": "PI",
+      "path": "D:\\work\\Personal\\Product-Intelligence\\tools\\spaiauto\\workflow.py",
+      "sha256": "6837add8cc23bc7e925268538fc0ca00c602bea8a67a6d6320382ea60c991a2b",
+      "lines": 540
+    },
+    {
+      "source": "PI",
+      "path": "D:\\work\\Personal\\Product-Intelligence\\tools\\spaiauto\\intake.py",
+      "sha256": "a83eeb4350d8dbdbac4eee897f6623447d8e2d5680f24f7b0f66ba507442b261",
+      "lines": 458
+    },
+    {
+      "source": "VF",
+      "path": "D:\\work\\video-factory\\README.md",
+      "sha256": "3a953aa341820b506eae7bc3b9ee4a8b8f0b5f049912188076eb376fe0b60132",
+      "lines": 57
+    },
+    {
+      "source": "VF",
+      "path": "D:\\work\\video-factory\\pyproject.toml",
+      "sha256": "3450c58edbc8f62c311c7ff2b7c169878fdbb0dbde33296a1e85ff2344cc849b",
+      "lines": 43
+    },
+    {
+      "source": "VF",
+      "path": "D:\\work\\video-factory\\docs\\developer\\architecture.md",
+      "sha256": "1965fd193a1e59eb2c165e7860a8c163d937f04b88f76b31111f700eefccb308",
+      "lines": 57
+    },
+    {
+      "source": "VF",
+      "path": "D:\\work\\video-factory\\docs\\release-personal\\README.md",
+      "sha256": "ea0204f61011ee1d50537d028223fef64f9ba8ed8ce6e99cd98b5b114315beb2",
+      "lines": 183
+    },
+    {
+      "source": "VF",
+      "path": "D:\\work\\video-factory\\src\\video_factory\\cli.py",
+      "sha256": "07f940b3873a44f33baf06de11c05e691b486168cf68486a2e3cc55d82270f12",
+      "lines": 3150
+    },
+    {
+      "source": "VF",
+      "path": "D:\\work\\video-factory\\src\\video_factory\\config.py",
+      "sha256": "a9138cea84abf01233ee2169c4774ecc0ebe217ec3a3f7506743491d0861f0ff",
+      "lines": 31
+    },
+    {
+      "source": "VF",
+      "path": "D:\\work\\video-factory\\src\\video_factory\\constants.py",
+      "sha256": "343a2829789b866630bc3db37bd0e04c8530f6216ac4d0d2613d3ceb18ba4360",
+      "lines": 36
+    },
+    {
+      "source": "VF",
+      "path": "D:\\work\\video-factory\\src\\video_factory\\automation\\creative_cli.py",
+      "sha256": "6d3d168b5a76f73d559777ea9c13676b6ff2b18fa4c2e83da20ace4b006f8617",
+      "lines": 750
+    },
+    {
+      "source": "VF",
+      "path": "D:\\work\\video-factory\\src\\video_factory\\automation\\creative_policy.py",
+      "sha256": "fd53f8fdf3b2675b63b064e6002b1537f4ee1b0c8cded2f4de3571e8d664d38d",
+      "lines": 54
+    },
+    {
+      "source": "VF",
+      "path": "D:\\work\\video-factory\\src\\video_factory\\creative\\agents\\service.py",
+      "sha256": "e77158ef017a0a86e502b0a36ecf667f324e3309ea1025983e228aa84fb4eae6",
+      "lines": 163
+    },
+    {
+      "source": "VF",
+      "path": "D:\\work\\video-factory\\src\\video_factory\\handlers\\common.py",
+      "sha256": "d03a0672a213b5cf10989ea164fb5e39361489228ce9336b0a404c55724f69e3",
+      "lines": 1132
+    },
+    {
+      "source": "VF",
+      "path": "D:\\work\\video-factory\\src\\video_factory\\handlers\\registry.py",
+      "sha256": "779fc6c0c6be50a6f9c9c98db7fdbced831a4f2f244174f40107ea4d0ba44ae8",
+      "lines": 1817
+    },
+    {
+      "source": "VF",
+      "path": "D:\\work\\video-factory\\src\\video_factory\\workflows\\worker.py",
+      "sha256": "27a182ff95f9a3ebb425ad252cb0a4d20908bd6b2f1789f0262ee44b3828134d",
+      "lines": 412
+    },
+    {
+      "source": "VF",
+      "path": "D:\\work\\video-factory\\src\\video_factory\\workflows\\outbox_repository.py",
+      "sha256": "ec0642e206354894319bb64585a962a58357b068ae0dca717b985268dcb13c8f",
+      "lines": 636
+    },
+    {
+      "source": "VF",
+      "path": "D:\\work\\video-factory\\src\\video_factory\\integrations\\google_flow_provider.py",
+      "sha256": "7cba46fb7b259040c9ae5f9e7842ed313934d71b006563e98b8d85f5c455e7f7",
+      "lines": 798
+    },
+    {
+      "source": "VF",
+      "path": "D:\\work\\video-factory\\src\\video_factory\\integrations\\google_flow_keyframe_provider.py",
+      "sha256": "15c4e49310d0474e8e1c9671a66c1696315505d967106e78b76540ec7d34012f",
+      "lines": 998
+    },
+    {
+      "source": "VF",
+      "path": "D:\\work\\video-factory\\src\\video_factory\\integrations\\composer.py",
+      "sha256": "50447e66fe62a811b9ad210504eb188596ff358637b1ab8fb3c2af91b781a621",
+      "lines": 548
+    },
+    {
+      "source": "VF",
+      "path": "D:\\work\\video-factory\\src\\video_factory\\integrations\\tiktok_export.py",
+      "sha256": "a760963ac8c6605d046a65ab88bf8c1c8c12cb9e631a4a5acd227daae2564005",
+      "lines": 126
+    },
+    {
+      "source": "runtime",
+      "path": "D:\\work\\pi-vf-runtime-20261102\\README.md",
+      "sha256": "3a855e40a409b18036e8f46950b6751396a71d3adf465eadb0896024a302590b",
+      "lines": 33
+    },
+    {
+      "source": "runtime",
+      "path": "D:\\work\\pi-vf-runtime-20261102\\Activate.ps1",
+      "sha256": "6afb8f7c5b491e4df724644e04cf83d8aba7d0e01b6f5b6bfcc1a78c13174ac2",
+      "lines": 11
+    },
+    {
+      "source": "runtime",
+      "path": "D:\\work\\pi-vf-runtime-20261102\\Run-VF.ps1",
+      "sha256": "5949cbe903a7a1800013c66f0bc7dd75b40dfba6718842fe24fb1f132a9a1e09",
+      "lines": 7
+    },
+    {
+      "source": "runtime",
+      "path": "D:\\work\\pi-vf-runtime-20261102\\Start-Studio.ps1",
+      "sha256": "d3a006b3c2390ab356acf6ab4c37b85a735946ca30b0a1163021c2cfee5f4276",
+      "lines": 5
+    }
+  ],
+  "checks": [
+    {
+      "project": "PI",
+      "tests": [
+        "tests/test_sheet_daily.py",
+        "tests/test_selection_handoff.py",
+        "tests/test_selection_intake.py",
+        "tests/test_selection_publish.py"
+      ],
+      "result": "13 passed in 5.37s",
+      "exit_code": 0
+    },
+    {
+      "project": "VF",
+      "tests": [
+        "tests/test_creative_batch_entrypoint.py",
+        "tests/test_silent_final_contract.py",
+        "tests/test_keyframe_best_candidate_selection.py"
+      ],
+      "result": "23 passed in 18.56s",
+      "exit_code": 0
+    }
+  ],
+  "test_harness": {
+    "interpreter": "Each source repo .venv/Scripts/python.exe",
+    "pytest_args": [
+      "-q",
+      "-p",
+      "no:cacheprovider"
+    ],
+    "network": "socket.create_connection and socket.socket.connect replaced by raising guards before pytest collection/execution; VF conftest also active",
+    "not_full_regression": true
+  },
+  "historical_mp4_rechecked": {
+    "path": "D:\\work\\pi-vf-runtime-20261102\\workspace\\exports\\export_proj-pv-daily-534f6e82cab9e9c0_1\\final.mp4",
+    "sha256": "f329dc08f06a37c2f8d133c9c4b573d8cfc5ebf26f6ea23beb72c3ed3489ad1c",
+    "ffprobe": {
+      "codec": "h264",
+      "width": 1080,
+      "height": 1920,
+      "frame_rate": "30/1",
+      "nb_frames": 960,
+      "duration_seconds": 32,
+      "audio_streams": 0
+    },
+    "limitation": "Historical output. This audit rechecked metadata and SHA, not full decode or visual quality."
+  },
+  "builder_review": {
+    "result": "No important unanswered questions",
+    "scope": "Read-only review of README, DESIGN and BUILD-SEQUENCE; not code verification"
+  },
+  "document_checks": {
+    "internal_links_checked": 11,
+    "source_hashes_rechecked": 33,
+    "markdown_fences_and_whitespace": "PASS",
+    "cli_parser_audit": {
+      "run_subcommand_exists": false,
+      "creative_batch_exists": true,
+      "start_exists": true
+    },
+    "errors": []
+  },
+  "implementation_verification": {
+    "date": "2026-11-03",
+    "root": "D:\\work\\pi-vf-next",
+    "pytest": "30 passed in 13.20s",
+    "network": "Denied by test fixture; no live model/browser generation",
+    "dependencies": "20 packages compatible; frozen offline sync passed",
+    "powershell": "Parse passed; status worked from D:/work",
+    "sheet_compatibility": {
+      "basis": "Read-only historical XLSX snapshots, not fresh live downloads",
+      "workbooks": 2,
+      "tabs": 7,
+      "listing_candidates": 69
+    },
+    "review": {
+      "important_findings": 4,
+      "fixed_with_regression": 4,
+      "live_declined": "UI selectors, actual model fidelity, full video visual quality require supervised smoke"
+    },
+    "structure": {
+      "source_python_files": 11,
+      "database_tables": [
+        "runs",
+        "items",
+        "operations"
+      ],
+      "data_subfolders": [
+        "sheets/<day>",
+        "products/<name>-<short-id>",
+        "browser"
+      ],
+      "stage_subfolders": false
+    },
+    "docs_links_checked": 16,
+    "old_source_hashes_rechecked": 33,
+    "errors": [],
+    "files": [
+      {
+        "path": "src\\pi_vf\\acquire.py",
+        "sha256": "3298eb899b5a77d11396525e33964408d911909c5bcfae704d2ab7636ee9214c"
+      },
+      {
+        "path": "src\\pi_vf\\cli.py",
+        "sha256": "888bbf1fc2a534e9a49bee0e84553807ff142d1e9ea03e8791d65591d9a54599"
+      },
+      {
+        "path": "src\\pi_vf\\core.py",
+        "sha256": "55d38aa24db1c4bbe0dce8823501ba8aae9510b783a3c1fc616d71eb6db69a61"
+      },
+      {
+        "path": "src\\pi_vf\\creative.py",
+        "sha256": "1ec3a87b9e5b9edcc6dc1c171ab275b08dbc9901ce17b9b01503c4e575280923"
+      },
+      {
+        "path": "src\\pi_vf\\flow.py",
+        "sha256": "ebd30be1a370cc36040d1f4295dd2795e5eebe8bb0a477eb2340792cf9f0455c"
+      },
+      {
+        "path": "src\\pi_vf\\media.py",
+        "sha256": "d74e109095224762e8002f26ada35baa51761e7f27d2723641068501571c5f55"
+      },
+      {
+        "path": "src\\pi_vf\\pipeline.py",
+        "sha256": "6cceebfc80ca37a78f10707eb7841c77a3b1bd4484b5c3e02ab4827e254ba38f"
+      },
+      {
+        "path": "src\\pi_vf\\sheets.py",
+        "sha256": "38b531350b125e4a5809ecd7b0d972229d3dcd88feab97262feaa9dcf7ba8736"
+      },
+      {
+        "path": "src\\pi_vf\\store.py",
+        "sha256": "6bb8b7f1cd196f381dd3b3942743fce7c9fe46e04de81a6a0a7d3eb5d443db66"
+      },
+      {
+        "path": "src\\pi_vf\\__init__.py",
+        "sha256": "cb2fec5ab36087d234499b1ef345848676ec13341ccb02d4db413290e418538e"
+      },
+      {
+        "path": "src\\pi_vf\\__main__.py",
+        "sha256": "935a1c1166b0c1ea35a82256345000bf2c73ded718d77773bc27a71ecce28f7d"
+      },
+      {
+        "path": "tests\\conftest.py",
+        "sha256": "98c3ca4296fd2722d0150e4aef3c1a00094932355b9f599f814fa8aef683606e"
+      },
+      {
+        "path": "tests\\test_cli.py",
+        "sha256": "65d8612c585e292786cf8fdc4a49b028ab374a52d459f2dd3ddaf73fdf0bd033"
+      },
+      {
+        "path": "tests\\test_creative.py",
+        "sha256": "a30b160d2f6f91afe748472dfa2737428811da29be0a4a29f6c32614c9999e87"
+      },
+      {
+        "path": "tests\\test_flow.py",
+        "sha256": "aa2816feb5e2674052b1f519af50c1d1c0a5ec943a995b836eecf71d3533ca2a"
+      },
+      {
+        "path": "tests\\test_inputs.py",
+        "sha256": "24b9a499442c3b15ca4e4d2153949f6e2f891ea165dfacb4b92869d771abf7ed"
+      },
+      {
+        "path": "tests\\test_pipeline.py",
+        "sha256": "ce7b26cb37daddb4e3a9d452020f48daaa4f7bafccb72b5e61854b0fdd12145a"
+      },
+      {
+        "path": "tests\\test_store.py",
+        "sha256": "d91239117b2b7e0c0ccd2ccba137efc302c5b095c8f4271a1ec1755edd816b04"
+      },
+      {
+        "path": "README.md",
+        "sha256": "02420f22ff55d0030f5221a985b43eb633dc8114a0e9b679a17a0b187c37c431"
+      },
+      {
+        "path": "Run.ps1",
+        "sha256": "7b9739128a102b77da63aed4958ac458a694a77e99ebe5a5b67cc685c3717b66"
+      },
+      {
+        "path": "pyproject.toml",
+        "sha256": "e1362a93d73cdb3cc0a10fe29797686eef860bf64e9fb8ce5495dff1b688adae"
+      },
+      {
+        "path": "config.example.toml",
+        "sha256": "f16243f2a6be53e8500907e5ef1f67a180dcd89ea33e6dfe55a54359d68b9980"
+      },
+      {
+        "path": "docs\\IMPLEMENTATION.md",
+        "sha256": "633272abf4538d68a97e41b5d5c5069e0139a78a05a790aea6049f6b20321193"
+      }
+    ]
+  }
+}

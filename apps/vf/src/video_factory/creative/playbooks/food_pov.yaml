@@ -1,0 +1,29 @@
+version: food-pov-v2
+prerequisites: [food_shape]
+use_situation: Show a credible snack break, serving occasion, or gifting moment supported by the source.
+visual_hook: Show the food or gift contents immediately when an approved reference shows them.
+action_patterns:
+  - pick one visible piece to show its shape or cross-section
+  - serve a visible portion beside a cup or on a plate
+  - open or present a gift box only when the approved reference shows its contents and structure
+  - settle the source package beside the visible food for a stable buying cue
+sales_progression:
+  - recognition with an immediately visible food or gift detail
+  - a close detail that shows what the buyer gets
+  - one credible serving, snacking, or gifting action
+  - a stable product and pack shot to help the buyer recognize the item
+scene_reference_rules:
+  - Choose a reference that directly shows the food, hand grip, container, or packaging state required by the action.
+  - For an exposed-food or in-hand close-up, prefer a reference that actually shows the piece outside its package.
+  - For a gift reveal, use the approved open-box image. For the closing pack shot, use an approved packaging image.
+  - The closing pack must agree with the locked identity. A carton with a different printed shop or brand is not the closing pack, even if it is an eligible source photo.
+  - When approved images show the food outside the pack, reserve packaging-only motion for the closing scene and use the middle scenes for food detail and serving or gifting.
+  - Reuse a reference only when it supports the next action. Avoid repeating bag handling as a substitute for showing the food.
+  - When there is no approved image of the exposed product or open box, show an observable detail from the available reference.
+continuity: Preserve piece shape, coating, hand, container and lighting between cuts.
+immutable_traits: [food geometry, coating color, source packaging]
+forbidden: [invented brand, health claim, unsupported ingredient, substituted snack]
+qc_criteria: [exact food shape, plausible fingers, action progress, coherent joins]
+repair_strategies: [simplify grip, reduce moving pieces, fix the affected END only]
+good_example: A close-up uses the approved in-hand reference to show one piece, then the closing shot uses the approved pack image.
+bad_example: An unverified package pours a different snack.

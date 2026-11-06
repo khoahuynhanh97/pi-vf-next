@@ -1,0 +1,45 @@
+video_factory:
+  render_providers:
+    - vertex_ai
+    - google_flow
+  polling_timeout_seconds: 600.0
+  google_flow:
+    profile_path: "D:/work/pi-vf-next/runtime/vf/chrome_flow_profile"
+    chrome_profile_directory: "Default"
+    model: "Omni 1.1 Flash"
+    headless: true
+    ui_contract_verified: true
+    reference_upload_verified: true
+    cost_contract_verified: true
+  google_flow_keyframe:
+    profile_path: "D:/work/pi-vf-next/runtime/vf/chrome_flow_profile"
+    chrome_profile_directory: "Default"
+    model: "Nano Banana 2.1"
+    headless: true
+    ui_contract_verified: true
+    reference_upload_verified: true
+    cost_contract_verified: true
+  vertex_ai:
+    location: "us-central1"
+    model: "veo-3.1-generate-001"
+
+product_video:
+  nine_router:
+    enabled: true
+    endpoint: "http://127.0.0.1:20128/v1"
+    routes:
+      vision_qc:
+        enabled: true
+        combo_id: "bf9cb8e0-4385-446a-a8f0-c4865db864ce"
+        combo_name: "Vision-QC-Check"
+        execution_mode: "combo"
+      creative:
+        enabled: true
+        combo_id: "916bc948-97bf-41ea-95d7-f7373cc5ee08"
+        combo_name: "Story-Script-Agent"
+        execution_mode: "combo"
+  creative:
+    provider: "vertex"
+    model: "google/gemini-2.5-flash"
+    timeout_seconds: 120.0
+

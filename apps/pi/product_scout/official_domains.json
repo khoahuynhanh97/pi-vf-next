@@ -1,0 +1,23 @@
+{
+  "xiaomi": ["mi.com", "xiaomi.com", "appmifile.com", "file.market.xiaomi.com"],
+  "anker": ["anker.com", "ankerstatic.com"],
+  "ugreen": ["ugreen.com", "ugreen.com.vn", "ugreen-europe.com"],
+  "tp-link": ["tp-link.com", "tp-link.com.vn", "tp-link.com.cn"],
+  "baseus": ["baseus.com", "baseus.com.vn", "baseus.in", "baseuscdn.com"],
+  "ecovacs": ["ecovacs.com", "ecovacs-thailand.com"],
+  "dreame": ["dreame.tech", "dreametech.com"],
+  "roborock": ["roborock.com", "roborockglobal.com"],
+  "imou": ["imou.com", "imoulife.com"],
+  "ezviz": ["ezviz.com", "ezvizlife.com"],
+  "tapo": ["tapo.com", "tapo.com.vn"],
+  "mercusys": ["mercusys.com"],
+  "samsung": ["samsung.com"],
+  "philips": ["philips.com.vn", "philips.com"],
+  "lg": ["lg.com"],
+  "kangaroo": ["kangaroo.vn"],
+  "sunhouse": ["sunhouse.com.vn"],
+  "nagakawa": ["nagakawa.com.vn"],
+  "elips": ["elips.com.vn"],
+  "switchbot": ["switch-bot.com", "switchbot.com"],
+  "aqara": ["aqara.com"]
+}

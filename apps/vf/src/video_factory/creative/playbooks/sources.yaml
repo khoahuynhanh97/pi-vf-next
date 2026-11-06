@@ -1,0 +1,19 @@
+provenance_version: 1
+reuse: Selective principles paraphrased; no remote code or agent framework imported.
+sources:
+  - repository: https://github.com/calesthio/generative-media-skills
+    revision: 8c85352d5d75d4dcbe58480bd138e37b9742bab1
+    license: MIT
+    files:
+      - skills/production/content-formats/product-ad-production/SKILL.md
+      - skills/production/creative-direction/storyboard-previsualization/SKILL.md
+      - skills/production/governance-delivery/generated-media-qa/SKILL.md
+    used: Evidence-first concept, continuity, separate content and technical checks.
+  - repository: https://github.com/xianyu110/ecommerce-video-skills
+    revision: 96c49b349b7d975bda8f05ce6669c1d33500c269
+    license: MIT
+    files: [skills/multi-model-shot-prompts/SKILL.md]
+    used: Distinct state versus motion prompts; capability-aware references and negative prompts.
+excluded:
+  - repository: https://github.com/NancyXie01/AdCraft-AG2
+    reason: Not reused; revision lookup rate-limited. No AG2 dependency or approval phrase imported.

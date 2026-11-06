@@ -1,0 +1,12 @@
+version: home-appliance-v1
+prerequisites: [visible_controls]
+use_situation: A simple household routine.
+visual_hook: Show the supported part moving in a readable close view.
+action_patterns: [operate a documented mechanical control, position the appliance on a stable surface]
+continuity: Preserve control, room, grip and appliance state across adjacent shots.
+immutable_traits: [control geometry, housing, color, power arrangement]
+forbidden: [invented touchscreen, unsupported safety claim, fabricated effectiveness]
+qc_criteria: [visible control contact, supported state change, stable housing, coherent joins]
+repair_strategies: [reduce hand motion, correct contact landmark, recheck adjacent END]
+good_example: Turn a visible dial with a simple grip.
+bad_example: Touch an invented sensor to prove a quantified result.

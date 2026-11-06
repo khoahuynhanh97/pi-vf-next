@@ -1,0 +1,157 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Video Factory Studio</title>
+  <link rel="stylesheet" href="./studio.css">
+</head>
+<body class="vf-studio" data-theme="light">
+  <div class="vf-layout">
+    <!-- Sidebar Navigation -->
+    <aside class="vf-sidebar" aria-label="Điều hướng chính">
+      <div class="vf-brand">
+        <div class="vf-brand-icon">
+          <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <polygon points="5 3 19 12 5 21 5 3"></polygon>
+          </svg>
+        </div>
+        <div class="vf-brand-text">
+          <span class="vf-brand-title">Video Factory</span>
+          <span class="vf-brand-subtitle">Studio UI</span>
+        </div>
+      </div>
+
+      <nav class="vf-nav">
+        <a href="#products" class="vf-nav-item active" data-route="products" id="nav-results">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M4 5h16v14H4zM8 9h8M8 13h5"/>
+          </svg>
+          <span>Sản phẩm</span>
+        </a>
+
+        <a href="#intake" class="vf-nav-item" data-route="intake" id="nav-intake">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M20 7l-8-4-8 4m16 0l-8 4m8-4v10l-8 4m0-10L4 7m8 4v10M4 7v10l8 4"/>
+          </svg>
+          <span>Chọn & chạy batch</span>
+          <span class="vf-badge" id="badge-products" style="display:none">0</span>
+        </a>
+
+        <a href="#production" class="vf-nav-item" data-route="production" id="nav-production">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <rect x="2" y="7" width="20" height="14" rx="2" ry="2"/>
+            <path d="M16 21V5a2 2 0 0 0-2-2h-4a2 2 0 0 0-2 2v16"/>
+          </svg>
+          <span>Sản xuất</span>
+          <span class="vf-badge" id="badge-production" style="display:none">0</span>
+        </a>
+
+        <a href="#issues" class="vf-nav-item" data-route="issues" id="nav-issues">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <circle cx="12" cy="12" r="10"/>
+            <line x1="12" y1="8" x2="12" y2="12"/>
+            <line x1="12" y1="16" x2="12.01" y2="16"/>
+          </svg>
+          <span>Cần xử lý</span>
+          <span class="vf-badge vf-badge-alert" id="badge-issues" style="display:none">0</span>
+        </a>
+
+        <a href="#videos" class="vf-nav-item" data-route="videos" id="nav-videos">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <polygon points="23 7 16 12 23 17 23 7"/>
+            <rect x="1" y="5" width="15" height="14" rx="2" ry="2"/>
+          </svg>
+          <span>Video hoàn tất</span>
+          <span class="vf-badge vf-badge-success" id="badge-videos" style="display:none">0</span>
+        </a>
+      </nav>
+
+      <div class="vf-sidebar-footer">
+        <div class="vf-legacy-links">
+          <span class="vf-footer-label">Giao diện cũ:</span>
+          <a href="/products" target="_blank" rel="noopener noreferrer" class="vf-link-legacy">/products (Scout)</a>
+          <a href="/operator" target="_blank" rel="noopener noreferrer" class="vf-link-legacy">Operator cũ</a>
+        </div>
+        <div class="vf-env-indicator">
+          
+          <span>Trạng thái từ backend</span>
+        </div>
+      </div>
+    </aside>
+
+    <!-- Main Content Area -->
+    <div class="vf-main-wrapper">
+      <header class="vf-topbar">
+        <div class="vf-topbar-left">
+          <h1 class="vf-page-title" id="page-title">Sản phẩm</h1>
+          <span class="vf-source-indicator" id="source-indicator">Dữ liệu theo ngày</span>
+        </div>
+        <div class="vf-topbar-right">
+          <button type="button" class="vf-btn vf-btn-secondary" id="btn-theme" aria-label="Đổi giao diện sáng tối">Sáng / tối</button>
+          <div class="vf-sync-status" id="sync-status">Đang kết nối...</div>
+          <button type="button" class="vf-btn vf-btn-secondary" id="btn-refresh" title="Làm mới dữ liệu từ API">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <polyline points="23 4 23 10 17 10"/>
+              <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/>
+            </svg>
+            <span>Làm mới</span>
+          </button>
+        </div>
+      </header>
+
+      <!-- Notification / Alert Bar -->
+      <div id="status-bar" role="status" aria-live="polite" class="vf-status-bar" style="display:none;"></div>
+
+      <!-- Views Container -->
+      <main class="vf-content" id="app-root">
+        <!-- Rendered dynamically by studio.mjs -->
+      </main>
+  <!-- Full-page product workspace -->
+  <section id="detail-modal" class="vf-detail-page" role="main" aria-labelledby="detail-title" hidden>
+    <div class="vf-modal-content">
+      <div class="vf-modal-header">
+        <div class="vf-modal-title-group">
+          <h2 id="detail-title" class="vf-modal-title">Chi tiết sản phẩm</h2>
+          <span id="detail-workflow-id" class="vf-code-badge"></span>
+        </div>
+        <button type="button" class="vf-modal-close" id="btn-close-detail" aria-label="Trở về danh sách sản phẩm">← Sản phẩm</button>
+      </div>
+
+      <div class="vf-modal-tabs" role="tablist">
+        <button type="button" role="tab" class="vf-tab-btn active" data-tab="overview" id="tab-btn-overview" aria-selected="true">Các bước</button>
+        <button type="button" role="tab" class="vf-tab-btn" data-tab="scenes" id="tab-btn-scenes" aria-selected="false">Cảnh & Nguyên liệu</button>
+        <button type="button" role="tab" class="vf-tab-btn" data-tab="qc" id="tab-btn-qc" aria-selected="false">QC & Chi phí</button>
+        <button type="button" role="tab" class="vf-tab-btn" data-tab="history" id="tab-btn-history" aria-selected="false">Lịch sử</button>
+      </div>
+
+      <div class="vf-modal-body" id="detail-body">
+        <!-- Injected dynamically -->
+      </div>
+
+      <div class="vf-modal-footer" id="detail-footer">
+        <div class="vf-footer-info" id="detail-footer-info"></div>
+        <div class="vf-footer-actions" id="detail-footer-actions"></div>
+      </div>
+    </div>
+  </section>
+
+    </div>
+  </div>
+
+  <!-- Video Preview Modal -->
+  <dialog id="preview-modal" class="vf-modal vf-modal-video" aria-labelledby="preview-title">
+    <div class="vf-modal-content">
+      <div class="vf-modal-header">
+        <h2 id="preview-title" class="vf-modal-title">Xem trước Video</h2>
+        <button type="button" class="vf-modal-close" id="btn-close-preview" aria-label="Đóng xem trước">✕</button>
+      </div>
+      <div class="vf-modal-body vf-preview-body" id="preview-body">
+        <!-- Video element injected on demand -->
+      </div>
+    </div>
+  </dialog>
+
+  <script type="module" src="./studio.mjs"></script>
+</body>
+</html>

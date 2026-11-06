@@ -1,0 +1,68 @@
+# Rà soát pipeline và QC sản phẩm
+
+Rà ngày 2026-11-03 trên working tree của `D:/work/pi-vf-next`. Bảng phân biệt hành vi đọc được từ code, lỗi tái hiện offline và rủi ro cần xác nhận live. `status` hiện trả danh sách rỗng. `doctor` báo thiếu text/vision model và hạn mức Flow bằng 0. Chưa có số đo thời gian hay chất lượng từ một lượt chạy thật của project mới.
+
+Kiểm tra trong lượt rà này đạt 30 tests offline. Ba phép thử riêng xác nhận biến thể tương đương bị loại, hành động thiếu bằng chứng được validator chấp nhận và allocator có thể cấp lượt mới sau lỗi phục hồi. Các phép thử dùng dữ liệu giả và DB tạm.
+
+## Luồng thực tế và luồng đề xuất
+
+| Công đoạn | Hiện tại | Đề xuất |
+|---|---|---|
+| Danh sách | CLI tải hai Google Sheet dưới dạng XLSX. Parser đọc được XLSX/CSV nhưng CLI thiếu đường nhập file Excel local. | Hai nguồn vào dùng chung parser. Giữ tab, dòng, lý do loại và trạng thái listing. |
+| Lọc tối đa 15 | Loại link/variant mâu thuẫn và listing đã có trong DB, sau đó gửi cả danh sách còn lại cho model chọn. | Lọc theo quy tắc rõ trước. Gửi shortlist và các cột cần xếp hạng. Chọn tối đa 15, báo lý do và số lượng thực tế. |
+| Spaiauto | Từng listing mở Chrome, quét và tải ZIP vào folder sản phẩm. | Xác nhận kết quả vừa quét đúng listing. Lưu dấu vết nguồn và phục hồi từ ZIP/capture đã tải nếu hợp lệ. |
+| Ảnh chuẩn và Product Lock | Vision nhận sáu ảnh đầu, chọn file và tạo lock với facts. | Sàng ảnh hỏng, trùng, quá nhỏ trước. Vision chọn một ảnh chính và một hoặc hai ảnh chi tiết hữu ích. Lock ghi những đặc điểm phải giữ, ảnh chứng minh và phần chưa xác minh. |
+| Brief và kịch bản | Một lần gọi model tạo brief và đúng bốn scene. | Giữ một lần gọi. Chốt hành động, chi tiết phải xuất hiện và ảnh tham chiếu theo scene trước khi tạo ảnh. |
+| Keyframe và storyboard | Mỗi scene có một START keyframe đã qua vision QC. Storyboard hiện là plan và các keyframe lưu riêng, chưa có bản tổng hợp. | Tạo keyframe theo các scene đã chốt. Ghép plan, ảnh và QC thành storyboard theo thứ tự, có thể xuất `storyboard.json` ngay trong folder sản phẩm. |
+| Clip và MP4 | Flow tạo clip theo từng START frame. FFmpeg kiểm định dạng và ghép video. | Kiểm nhẹ vài mốc trong clip để phát hiện đổi hình, nhãn hoặc biến thể. Chỉ sửa scene lỗi. Sau đó kiểm kỹ thuật MP4. |
+
+## Điểm nghẽn và cách xử lý
+
+P0 là vấn đề có thể làm sai sản phẩm hoặc gây chi phí không cần thiết. P1 là vấn đề thường làm pipeline kẹt hoặc khó vận hành. P2 là tối ưu sau khi có số đo.
+
+| Mức | Điểm nghẽn | Đề xuất và bằng chứng |
+|---|---|---|
+| P1 | Chỉ có đường CLI cho hai Sheet. Một nguồn lỗi ngăn tạo cặp snapshot. | Thêm đầu vào Excel local vào cùng luồng. Với cặp Sheet, chỉ tái sử dụng snapshot cũ theo lựa chọn có hiển thị ngày và nguồn. `cli.py:24`, `sheets.py:120`. |
+| P1 | Parser lấy dòng đầu làm tiêu đề và chỉ nhận các kiểu link sản phẩm hỗ trợ. Tab có tiêu đề phụ, link rút gọn hoặc thiếu cột có thể làm pool rỗng. | Báo tab/cột/dòng bị loại, giữ nguyên ID dạng chuỗi, xử lý các mẫu link đã biết theo bằng chứng. `sheets.py:32`, `sheets.py:73`. |
+| P1 | Hai quy cách trong cùng listing bị coi là mâu thuẫn, ngay cả cách viết có thể tương đương. Một listing đã được giữ chỗ sẽ bị loại ở các ngày sau bất kể trạng thái. | Chuẩn hóa số lượng/đơn vị có quy tắc. Duy trì một mục cho mỗi listing trong batch, có cách xử lý item bị bỏ dở và yêu cầu làm lại có chủ đích. `sheets.py:89`, `store.py:25`, `cli.py:84`. |
+| P1 | Gửi toàn bộ ứng viên cùng metadata cho model, tiêu chí chọn chung và có thể trả danh sách rỗng. Hai lượt lỗi model có thể hết quyền chọn trong ngày trước khi có pool cho người dùng xem. | Ghi pool trước khi gọi model. Giới hạn payload theo shortlist và tiêu chí rõ. Báo rõ không có hàng hợp lệ, lỗi chọn hay model chủ động chọn ít. `sheets.py:102`, `cli.py:87`. |
+| P0 | Spaiauto kiểm ô đã nhập và tiêu đề hiện lên, rồi gán URL yêu cầu vào capture. Điều này chưa xác nhận dữ liệu hiển thị và ZIP thuộc kết quả vừa quét. Đây là rủi ro từ code, chưa quan sát thấy một lần lấy nhầm live. | Chờ tín hiệu kết quả mới và kiểm listing ID hoặc URL kết quả nếu giao diện cung cấp. Nếu thiếu, đối chiếu tên/variant và đánh dấu cần xác minh khi mâu thuẫn. `acquire.py:104–125`. |
+| P1 | Spaiauto phụ thuộc selector, Chrome profile và nhiều lần chờ nối tiếp. `doctor` chỉ xác nhận điều kiện local. | Thử riêng một listing thực đến ZIP trước khi bật batch. Phân biệt lỗi đăng nhập, DOM, quét, download và import. `acquire.py:93–128`, `cli.py:38`. |
+| P1 | Mỗi lần quét lại tải ZIP. Ảnh PNG đích ghi trực tiếp, file cùng tên đã tồn tại thì lấy SHA file hiện tại. Ghi dở có thể được dùng lại khi resume. | Xác thực và tái dùng ZIP/capture hoàn chỉnh. Ghi ảnh tạm rồi đổi tên, kiểm ảnh đích trước khi dùng lại. `acquire.py:20–35`, `acquire.py:119`. |
+| P1 | Một ảnh quá nhỏ/nặng có thể ném `ValueError` làm cả import ZIP dừng dù còn ảnh dùng được. Dedupe theo hash bỏ được bản trùng byte, nhưng có thể giữ ảnh gần giống nhau. | Cách ly lỗi ảnh riêng lẻ, giữ kiểm an toàn của cả ZIP. Chọn bộ ảnh đủ góc thay vì chạy thêm model cho mọi file. `acquire.py:36–64`. |
+| P0 | Vision chỉ xem sáu ảnh đầu theo thứ tự giải nén. Một ảnh mặt trước đẹp hoặc ảnh đúng SKU ở sau có thể bị bỏ qua. | Sàng và xếp shortlist cục bộ theo độ rõ, kích thước và độ đa dạng. Vision chọn ảnh hero, ảnh nhãn và ảnh cấu tạo cần thiết trong một lượt. `pipeline.py:104–110`. |
+| P0 | So biến thể bằng chuỗi đã bỏ dấu và ký tự. `500 ml` và `0.5 L` bị loại dù tương đương. Bỏ dấu thập phân cũng có thể gộp nhầm các số khác nhau. | So đơn vị và số lượng bằng giá trị chuẩn hóa, giữ kiểm chặt khi chưa xác định. Tránh xóa dấu thập phân trong trường định lượng. `creative.py:82–88`. |
+| P0 | Product Lock thiếu danh sách đặc điểm bắt buộc có dẫn chứng theo ảnh. Fact nhìn thấy không buộc chỉ rõ ảnh nào. Có trích dẫn từ listing cũng chưa bảo đảm nội dung diễn giải đúng. | Mỗi đặc điểm quan trọng gắn ảnh nguồn, chi tiết quan sát được và mức chắc chắn. Ưu tiên hình dáng, bộ phận, nhãn, màu và variant. `creative.py:89–107`. |
+| P0 | Validator kiểm JSON và fact IDs nhưng cho `fact_ids=[]` và không đối chiếu hành động tự do với cấu tạo thật. | Scene ghi chi tiết bắt buộc và reference phù hợp. Chặn xung đột rõ như “mở nắp thứ hai” khi lock chỉ có một nắp. Thử offline đã tái hiện plan không có bằng chứng vẫn qua. `creative.py:110–124`. |
+| P0 | Pipeline truyền danh sách ảnh, nhưng Flow chỉ gắn `references[0]` cho mọi scene. Scene mở nắp và scene cận nhãn có thể dùng cùng một góc không đủ thông tin. | Chọn một ảnh tham chiếu chính **theo scene** và pin SHA ảnh thực sự được gửi. Các ảnh bổ sung vẫn hữu ích khi QC. `pipeline.py:126–129`, `flow.py:275–282`. |
+| P1 | Ảnh lệch 9:16 bị chặn trước vision QC và có thể bị tải lại nhiều lần. File hỏng, tải lỗi và tỷ lệ không hợp lệ đang khó phân biệt khi nhìn trạng thái. | Bỏ tỷ lệ khỏi verdict ảnh. Giữ check decode và kích thước an toàn. Nếu adapter yêu cầu canvas dọc thì chuẩn hóa trước upload, không kéo méo hoặc cắt điểm nhận diện. `media.py:28–35`, `flow.py:304`, `flow.py:355–362`. |
+| P0 | QC ảnh chỉ ghi một verdict/lý do chung. Điểm số hiện chỉ kiểm hữu hạn, không dùng chọn ảnh hay mở khóa. Retry khi FAIL dùng lại payload cũ. | Dùng một lượt vision để kiểm những chi tiết bắt buộc của cảnh. Ghi mong đợi, điều quan sát và kết quả. Đưa lỗi cụ thể vào một lần sửa tiếp theo. Bỏ điểm tổng nếu không dùng. `creative.py:24`, `pipeline.py:126–144`. |
+| P1 | `UNKNOWN` từ vision được ghi FAILED ở operation model, dùng hết hai lượt thì chặn. Retry, ảnh không đủ bằng chứng và lỗi dịch vụ chưa có đường xử lý riêng rõ ràng. | Với thiếu bằng chứng, bổ sung ảnh/crop chi tiết hoặc đổi góc cảnh. Với lỗi dịch vụ, chờ có hạn. Giữ nguyên keyframe hợp lệ về file và số lượt generation. `pipeline.py:39–57`, `pipeline.py:132–140`, `store.py:116`. |
+| P1 | Bốn scene, 8 giây/scene và 960 frames được cài ở nhiều lớp. Tăng lên 5–6 scene chỉ ở prompt sẽ bị chặn. | Pilot với bốn scene. Khi có lý do rõ để mở 5–6, dùng số scene thực từ plan cho validation, quota và export. `creative.py:110–124`, `flow.py:274`, `media.py:61–79`. |
+| P0 | Clip chỉ được kiểm kỹ thuật. Một keyframe đúng vẫn có thể bị đổi nhãn, méo tay cầm hoặc thay variant giữa clip. | Lấy vài frame đầu, giữa, cuối, ưu tiên mốc thao tác chính. Kiểm theo cùng lock và chi tiết cảnh. Nếu drift rõ, chỉ sửa scene đó. `pipeline.py:145–159`, `media.py:38–58`. |
+| P1 | Hoàn thành mọi keyframe của sản phẩm rồi mới tạo clip đầu tiên. Một keyframe khó làm các cảnh đã đạt phải đợi, nhưng cũng tránh tốn clip cho storyboard còn lỗi. | Giữ cổng storyboard trước clip cho pilot. Sau số đo thực, cân nhắc chạy cảnh độc lập đã đạt khi các cảnh không cần liền mạch và ngân sách cho phép. `pipeline.py:120–152`. |
+| P1 | Flow khởi động và đóng Chrome ở mỗi submit và poll, kiểm UI nhiều lần. Poll thiếu tile hoặc không phân biệt được tile sẽ chờ lại. | Đo thời gian open, submit, poll và download. Tái dùng session khi an toàn, lưu provider ID và giữ nguyên quy tắc chống Send trùng. `flow.py:162–171`, `flow.py:235`, `flow.py:296`. |
+| P0 | Phục hồi receipt cũ dùng chung allocator với sinh mới. Nếu operation cũ được đánh FAILED khi phục hồi, allocator có thể cấp lượt mới trong khi SHA của receipt vẫn buộc là file cũ. | Đường phục hồi chỉ poll đúng operation key cũ. Tái hiện offline ở allocator cho thấy nó cấp PREPARED attempt 2 sau trạng thái FAILED. `pipeline.py:27–37`, `store.py:99–126`. |
+| P1 | Giới hạn credit có thể đưa item vào NEEDS_INPUT. Tăng ngân sách vẫn không chạy tiếp vì resume chỉ mở lại FAILED/WAITING. `fix` yêu cầu capture mới và có thể bị chặn bởi operation chưa rõ. | Tách lý do chờ cấu hình, thiếu ảnh, hết quota và chờ provider. Cho phép resume khi điều kiện cấu hình tương ứng đã được sửa. `flow.py:173–179`, `pipeline.py:180–195`, `pipeline.py:218`, `cli.py:108`. |
+| P1 | `fix` thay toàn bộ dữ liệu item từ identity trở đi. Lượt model cùng scope được đếm qua revision, nên hai lượt cũ có thể khiến ảnh mới không được QC. | Invalidate đúng scene hoặc đúng phần dữ liệu thay đổi. Giữ trần chi phí tổng, tính retry lỗi nội dung theo input thực sự mới trong trần đó. `pipeline.py:218–232`, `store.py:99–126`. |
+| P1 | Runner làm từng việc đồng bộ, một lượt chờ router có timeout 120 giây. Poll 15 giây và trần vòng lặp có thể cắt batch dù còn việc. Thiếu số đo theo stage. | Đo thời gian chờ và số lần thử riêng từng stage. Backoff theo provider, chặn lỗi cấu hình sớm, tách “hết thời gian lượt chạy” khỏi “scene lỗi”. `creative.py:55–59`, `pipeline.py:164–208`. |
+| P2 | Ảnh dưới 10 MB vẫn gửi nguyên dung lượng base64 nhiều lần. Model plan cũng đi qua vision vì nhận ảnh. | Sau khi lock đủ giàu, thử gửi lock và hình thu nhỏ/crop có chủ đích. Giữ ảnh độ nét đủ cho kiểm nhãn. Đo latency và chất lượng trước khi giảm dữ liệu. `creative.py:32–51`, `pipeline.py:111–140`. |
+| P1 | Clip bị buộc đúng 8 giây trong sai số khoảng một frame, rồi export crop giữa. Clip có thể xem được nhưng bị kẹt vì sai số nhỏ, hoặc mất nhãn khi crop. | Chọn dung sai kỹ thuật có lý do, căn lại thời lượng khi đủ footage. Giữ vùng sản phẩm khi chuẩn hóa. `media.py:49–53`, `media.py:72`. |
+| P2 | Cùng clip có thể được giải mã khi download, khi commit operation và khi ghép. | Tái dùng receipt đã kiểm theo SHA và profile, kiểm lại khi byte thay đổi. Giữ kiểm decode toàn bộ cho MP4 cuối. `flow.py:361`, `pipeline.py:83`, `media.py:64–65`, `media.py:77`. |
+| P1 | Báo cáo chỉ hiện stage/status/reason cuối. Thiếu scene lỗi, lượt retry, bằng chứng và thao tác tiếp theo. | Bổ sung các trường đó vào summary hiện có. Người dùng biết cần bổ sung ảnh nào, mở project nào hay chỉ cần resume. `pipeline.py:210–216`, `cli.py:50–55`. |
+
+## QC nhẹ theo từng chặng
+
+- **Excel và chọn:** link đúng listing, variant rõ, đủ dữ liệu để xếp hạng, ghi lý do loại. Số lượng tối đa 15 sau lọc.
+- **ZIP và ảnh nguồn:** file giải mã được, đúng listing/variant, có góc tổng thể và đủ chi tiết cho cảnh dự kiến. Giữ một ảnh hero, thêm ảnh chi tiết khi cần.
+- **Lock và brief:** dùng bằng chứng cho hình dáng, bộ phận, màu, bao bì, nhãn và quy cách. Hạ cảnh hoặc bỏ claim khi thiếu bằng chứng.
+- **Kịch bản và storyboard:** bốn scene có mục đích khác nhau, hành động làm được, reference rõ, chi tiết bắt buộc nhất quán giữa các cảnh. Tạo storyboard bằng cách gom dữ liệu, không cần một lượt AI riêng.
+- **Keyframe:** xác nhận các chi tiết bắt buộc của cảnh, còn nền, góc máy và ánh sáng được linh hoạt. `PASS` khi có đủ bằng chứng, `FAIL` khi quan sát thấy sai, `UNKNOWN` khi không nhìn rõ. Mờ hoặc che khuất chỉ chặn khi ảnh cần chứng minh đúng chi tiết đó.
+- **Clip và export:** kiểm đầu/giữa/cuối và mốc thao tác quan trọng. Giữ thứ tự scene, audio theo preset, độ phân giải và khả năng decode của MP4. Kiểm mẫu giúp phát hiện drift, không bảo đảm tất cả frame.
+
+## Thứ tự tối ưu
+
+1. Xác nhận đường live riêng theo chặng với một sản phẩm, ghi số lần gọi, thời gian và lỗi. Chạy đến ZIP trước, rồi đến Lock, một keyframe và một clip. Mở đủ bốn scene sau khi từng chặng qua.
+2. Sửa các điểm làm sai sản phẩm trước. Xác thực ZIP đúng listing, chọn ảnh theo góc cần dùng, khóa đặc điểm nhận diện và gắn reference theo scene. Bỏ 9:16 khỏi QC ảnh.
+3. Sửa đường kẹt và tốn lượt. Retry đúng lỗi, phục hồi chỉ theo operation cũ, cho resume sau khi cấu hình được sửa. Thêm kiểm clip bằng vài frame và chỉ xử lý lại scene hỏng.
+4. Mở rộng từ một sản phẩm sang batch nhỏ rồi mới đến 15. Với bốn scene, lượt đầu của batch 15 đã là 60 keyframe, 60 clip, khoảng 91 lượt model chọn/identity/plan/QC ảnh, chưa tính retry và QC clip. Sáu scene tăng lên 90 keyframe, 90 clip và khoảng 121 lượt model theo cùng cách đếm. Các con số là số thao tác theo thiết kế, chưa phải báo giá hoặc số đo live.
