@@ -33,7 +33,8 @@ qua browser → tải ZIP + capture thông tin → import → duyệt ảnh → 
   không tự điều khiển browser và không chứng minh có tự động hóa chạy lịch.
 - Với batch, tiếp tục item còn lại sau lỗi/skip; tối đa 1 lần đầu + 2 retry
   cho mỗi bước search/scan/download, lưu lý do. Không tự bỏ qua captcha hoặc login.
-- Giữ ZIP và capture gốc; kiểm tra ảnh thật trước khi chọn, không đoán model,
+- Giữ capture gốc, ảnh đã giải nén và biên nhận import. Xóa ZIP mới sau khi import
+  thành công. Duyệt ảnh local trực tiếp, không tải lại URL từng ảnh. Không đoán model,
   biến thể, giá SKU hay khẳng định đủ ảnh chỉ dựa vào số file.
 - Flow code cũ vẫn giữ nguyên và dùng được khi người dùng yêu cầu. Không tự gọi
   crawler cũ để thay Spaiauto khi lỗi; không đổi schedule hoặc MCP mặc định.

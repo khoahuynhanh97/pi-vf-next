@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import re
 import shutil
 import uuid
@@ -11,7 +12,7 @@ from datetime import datetime
 from pathlib import Path
 from zipfile import BadZipFile
 
-from .importer import import_capture, verify_import
+from .importer import import_capture, validate_capture, verify_import
 from .videos import verified_videos
 from .storage import (SPAIAUTO_URL, atomic_json, bangkok_date, digest, item_key,
                       now, product_url, read_json)
@@ -100,15 +101,36 @@ def skip_item(run_dir: Path, key: str, reason: str) -> dict:
     return item
 
 
-def attach(run_dir: Path, key: str, capture: Path, archive: Path, screenshot: Path) -> Path:
+def discard_imported_zip(archive: Path) -> None:
+    try:
+        archive.unlink(missing_ok=True)
+    except OSError as exc:
+        logging.getLogger(__name__).warning("Could not remove imported ZIP %s: %s", archive, exc)
+
+
+def attach(run_dir: Path, key: str, capture: Path, archive: Path, screenshot: Path, *,
+           prepared: Path | None = None, keep_archive: bool = False) -> Path:
     state, item = _load_item(run_dir, key)
     if item["status"] in ("skipped", "imported", "reviewed"):
         raise ValueError("Item is finished; resume other items or initialize a new run.")
     if not all(item["attempts"][stage] for stage in ("scan", "download")):
         raise ValueError("Record scan and download attempts with begin before attaching.")
-    destination = run_dir / "items" / key / f"import_{uuid.uuid4().hex[:12]}"
+    label = "import_scheduled" if prepared is not None else f"import_{uuid.uuid4().hex[:12]}"
+    destination = run_dir / "items" / key / label
     try:
-        import_capture(capture, archive, screenshot, destination, item["source_url"])
+        if prepared is not None:
+            if (not prepared.resolve().is_relative_to(run_dir.resolve().parent)
+                    or not destination.resolve().is_relative_to(run_dir.resolve())):
+                raise ValueError("Prepared import must stay inside its intake row.")
+            if not destination.exists():
+                record = verify_import(prepared)
+                validate_capture(record["capture"], item["source_url"])
+                prepared.rename(destination)
+            record = verify_import(destination)
+            validate_capture(record["capture"], item["source_url"])
+            atomic_json(destination / "import.json", record)
+        else:
+            record = import_capture(capture, archive, screenshot, destination, item["source_url"])
     except (ValueError, OSError, KeyError, TypeError, BadZipFile) as error:
         item.update(status="import_error", reason=str(error))
         _save(run_dir, state, "import_error", key, reason=str(error))
@@ -118,6 +140,8 @@ def attach(run_dir: Path, key: str, capture: Path, archive: Path, screenshot: Pa
     item.pop("active_stage", None)
     item.pop("reason", None)
     _save(run_dir, state, "import", key, import_dir=str(destination.resolve()))
+    if record["assets"] and not keep_archive:
+        discard_imported_zip(archive)
     return destination
 
 
@@ -203,6 +227,7 @@ def _product(run_dir: Path, key: str, item: dict, target: int) -> tuple[dict, di
         "variations_text": capture.get("variations_text", ""),
         "pdp_url": item["source_url"], "source_url": item["source_url"],
         "acquisition_tool": "spaiauto", "captured_at": capture["captured_at"],
+        "archive_sha256": record.get("archive_sha256") or record["raw_checksums"].get("download.zip"),
         "status": "reviewed" if approval else "needs_review", "images": images,
         "videos": verified_videos(run_dir, key, item),
         "video_urls": capture.get("video_urls", []),
@@ -331,11 +356,13 @@ def publish(run_dir: Path, inbox_root: Path, batch_id: str | None = None,
             images.append({k: asset.get(k) for k in (
                 "asset_id", "original_url", "width", "height", "format", "sha256", "match_score", "match_method")})
             images[-1]["relative_path"] = relative.as_posix()
+            if not images[-1]["original_url"]:
+                images[-1].pop("original_url")
         provenance_relative = Path("products") / canonical.replace(":", "_") / "provenance.json"
         atomic_json(staging / provenance_relative, {
             "source_url": product["source_url"], "captured_at": product["captured_at"],
             "acquisition_tool": "spaiauto", "review": product["review"],
-            "claims_verified": False,
+            "archive_sha256": product["archive_sha256"], "claims_verified": False,
         })
         products.append({
             **{k: product[k] for k in ("name", "brand", "model", "variant", "category", "description",
@@ -499,9 +526,12 @@ def _publish_root_intake(run_dir: Path, inbox_root: Path, batch_id: str | None,
             if digest(dest) != asset["sha256"]: raise ValueError("Exchange image checksum mismatch.")
             image_out.append({k: asset.get(k) for k in ("asset_id", "original_url", "width", "height", "format", "sha256", "match_score", "match_method")})
             image_out[-1]["relative_path"] = rel.as_posix()
+            if not image_out[-1]["original_url"]:
+                image_out[-1].pop("original_url")
         provenance_rel = Path("products") / canonical.replace(":", "_") / "provenance.json"
         atomic_json(_staged_file(staging,provenance_rel), {"source_url": product["source_url"], "captured_at": product["captured_at"],
             "acquisition_tool":"spaiauto", "review":product["review"], "claims_verified":False,
+            "archive_sha256": product["archive_sha256"],
             "candidate_id":row.get("candidate_id"), "source_refs_json":row.get("input_metadata",{}).get("source_refs_json")})
         creative = {"kind":"creative-input-v1", "candidate_id":row.get("candidate_id"),
             "csv_sha256":state["selection_csv_sha256"],

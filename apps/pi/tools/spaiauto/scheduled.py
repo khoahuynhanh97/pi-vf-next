@@ -3,73 +3,30 @@
 from __future__ import annotations
 
 import base64
-import hashlib
 import json
-import logging
 import os
 import re
 import shutil
 import tempfile
 from pathlib import Path
-from urllib.parse import urlsplit
-from zipfile import ZipFile
+from zipfile import BadZipFile
 
 import httpx
 from playwright.sync_api import Error as BrowserError
 from playwright.sync_api import sync_playwright
 
 from tools.sheet_selection_agent import _complete
-from .importer import MAX_MEMBER, MAX_TOTAL, _check_archive, import_capture
+from .importer import import_capture, verify_import
 from .intake import SkipReason, finish_request, next_request, resolve_request, search_attempt, search_failed
 from .links import direct_product_url
 from .storage import SPAIAUTO_URL, atomic_json, digest, read_json
-from .workflow import _validate_review, attach, begin_attempt, review_item
-
-
-logger = logging.getLogger(__name__)
+from .workflow import _validate_review, attach, begin_attempt, discard_imported_zip, review_item
 
 
 class ImageReviewError(ValueError):
     def __init__(self, code: SkipReason, message: str):
         super().__init__(message)
         self.reason_code = code
-
-
-def _verified_sources(archive_path: Path, gallery: list[dict]) -> list[dict]:
-    domains = ("susercontent.com", "tiktokcdn.com", "tiktokcdn-us.com", "tiktokcdn-eu.com")
-    if archive_path.stat().st_size > MAX_TOTAL:
-        raise ValueError("ZIP exceeds download size limit")
-    verified = {}
-    with ZipFile(archive_path) as archive, httpx.Client(timeout=10, follow_redirects=False) as client:
-        members = {hashlib.sha256(archive.read(entry)).hexdigest(): entry.filename
-                   for entry in _check_archive(archive) if not entry.is_dir()}
-        for entry in gallery[:30]:
-            url = entry["original_url"]
-            parts = urlsplit(url)
-            host = parts.hostname or ""
-            if parts.scheme != "https" or not any(host == d or host.endswith("." + d) for d in domains):
-                continue
-            try:
-                with client.stream("GET", url) as response:
-                    if response.status_code != 200:
-                        logger.warning("Spaiauto source image check failed for %s: HTTP %s",
-                                       host, response.status_code)
-                        continue
-                    content_hash = hashlib.sha256()
-                    size = 0
-                    for chunk in response.iter_bytes():
-                        size += len(chunk)
-                        if size > MAX_MEMBER:
-                            break
-                        content_hash.update(chunk)
-                    member = members.get(content_hash.hexdigest()) if size <= MAX_MEMBER else None
-                    if member:
-                        verified.setdefault(member, url)
-            except httpx.HTTPError as exc:
-                logger.warning("Spaiauto source image check failed for %s: %s",
-                               host, type(exc).__name__)
-                continue
-    return [{"archive_member": member, "original_url": url} for member, url in verified.items()]
 
 
 def _capture(url: str, incoming: Path) -> None:
@@ -90,16 +47,15 @@ def _capture(url: str, incoming: Path) -> None:
             archive = incoming / "download.zip"
             event.value.save_as(str(archive))
             page.screenshot(path=str(incoming / "page.png"), timeout=12000)
-            capture["asset_sources"] = _verified_sources(archive, capture["gallery"])
             atomic_json(incoming / "capture.json", capture)
         finally:
             browser.close()
 
 
 def _review(row: dict, capture: dict, record: dict, preview: Path) -> dict:
-    allowed = [asset["asset_id"] for asset in record["assets"] if asset["original_url"]]
+    allowed = [asset["asset_id"] for asset in record["assets"]]
     if not allowed:
-        raise ImageReviewError(SkipReason.NO_MATCHING_IMAGES, "No ZIP images match the observed original image URLs")
+        raise ImageReviewError(SkipReason.REVIEW_ERROR, "Spaiauto ZIP has no readable candidate images")
     model = os.environ.get("PI_SPAIAUTO_REVIEW_MODEL") or "ag/gemini-3.8-flash"
     context = {
         "requested": row["name"], "metadata": row.get("input_metadata", {}),
@@ -128,7 +84,7 @@ def _review(row: dict, capture: dict, record: dict, preview: Path) -> dict:
     if result.get("identity_verified") is False:
         raise ImageReviewError(SkipReason.IDENTITY_UNVERIFIED, "Vision reviewer could not verify product identity")
     if not 1 <= len(result["selected_asset_ids"]) <= 5 or any(x not in allowed for x in result["selected_asset_ids"]):
-        raise ValueError("Vision reviewer did not select verified source images")
+        raise ValueError("Vision reviewer did not select valid images from the local ZIP import")
     identity = result.get("identity")
     if not isinstance(identity, dict) or not str(identity.get("variant") or "").strip():
         raise ImageReviewError(SkipReason.IDENTITY_UNVERIFIED, "Vision reviewer could not ground the variant or pack description")
@@ -188,9 +144,10 @@ def acquire_batch(run: Path, hist_roots: list[Path] | None = None) -> list[str]:
         archive = incoming / "download.zip"
         screenshot = incoming / "page.png"
         review_file = incoming / "review.json"
+        prepared = incoming / "extracted"
 
         # Replay check: Reuse reviewed authentic archive from history if available
-        if not (capture_path.is_file() and archive.is_file() and screenshot.is_file() and review_file.is_file()):
+        if not prepared.exists() and not capture_path.is_file():
             try:
                 from scripts.operator_intake_real import find_historical_archive
                 hist_match = find_historical_archive(url, hist_roots)
@@ -210,14 +167,20 @@ def acquire_batch(run: Path, hist_roots: list[Path] | None = None) -> list[str]:
                 if not capture_path.is_file():
                     _capture(url, incoming)
                 capture = read_json(capture_path)
-                if not review_file.is_file():
+                if not prepared.exists():
                     with tempfile.TemporaryDirectory(dir=incoming) as temp:
-                        preview = Path(temp) / "preview"
-                        record = import_capture(capture_path, archive, screenshot, preview, url)
-                        reviewing = True
-                        atomic_json(review_file, _review(row, capture, record, preview))
-                        reviewing = False
+                        staging = Path(temp) / "extracted"
+                        import_capture(capture_path, archive, screenshot, staging, url)
+                        staging.rename(prepared)
+                record = verify_import(prepared)
+                if record["assets"]:
+                    discard_imported_zip(archive)
+                if not review_file.is_file():
+                    reviewing = True
+                    atomic_json(review_file, _review(row, capture, record, prepared))
+                    reviewing = False
                 review = read_json(review_file)
+                _validate_review(review, record, prepared)
                 selection = {
                     "url": url,
                     "observed_title": capture["title"],
@@ -237,7 +200,7 @@ def acquire_batch(run: Path, hist_roots: list[Path] | None = None) -> list[str]:
                 evidence = incoming / "selection.json"
                 atomic_json(evidence, selection)
                 row = resolve_request(run, row_id, evidence)
-            except (BrowserError, httpx.HTTPError, OSError, ValueError, KeyError, TypeError) as exc:
+            except (BrowserError, httpx.HTTPError, OSError, ValueError, KeyError, TypeError, BadZipFile) as exc:
                 reason = f"Spaiauto acquisition or visual review paused: {type(exc).__name__}"
                 if isinstance(exc, ValueError):
                     reason += f": {exc}"
@@ -268,10 +231,12 @@ def acquire_batch(run: Path, hist_roots: list[Path] | None = None) -> list[str]:
             if item["status"] not in ("imported", "reviewed"):
                 begin_attempt(child, key, "scan")
                 begin_attempt(child, key, "download")
-                attach(child, key, capture_path, archive, screenshot)
+                staged = prepared if prepared.is_dir() or (
+                    child / "items" / key / "import_scheduled").is_dir() else None
+                attach(child, key, capture_path, archive, screenshot, prepared=staged)
             if item["status"] != "reviewed":
                 review_item(child, key, review_file)
-            finish_request(run, row_id, "completed", "Spaiauto ZIP and images verified against the selected listing.")
+            finish_request(run, row_id, "completed", "Local images extracted from the Spaiauto ZIP and visually reviewed against the selected listing.")
             reasons.append(f"{row_id}: completed")
         except Exception as exc:
             reason = f"Child acquisition attachment error: {exc}"

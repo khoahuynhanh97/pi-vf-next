@@ -206,7 +206,7 @@ def execute_operator_intake(
         begin_attempt(child_dir, k, "scan")
         begin_attempt(child_dir, k, "download")
 
-        dest = attach(child_dir, k, cap_path, zip_path, page_path)
+        dest = attach(child_dir, k, cap_path, zip_path, page_path, keep_archive=True)
         print(f"  Imported to: {dest}")
 
         review_item(child_dir, k, hist_rev_path)

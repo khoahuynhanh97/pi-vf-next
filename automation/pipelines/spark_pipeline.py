@@ -181,8 +181,8 @@ def is_verified_real_batch(batch_dir: Path | str) -> tuple[bool, str]:
         prov_rel = prod.get("provenance_path")
         if not prov_rel:
             return False, f"Sản phẩm '{prod.get('name')}' thiếu provenance_path (nguồn gốc chưa xác minh)."
-        prov_file = b_path / prov_rel
-        if not prov_file.is_file():
+        prov_file = (b_path / prov_rel).resolve()
+        if not prov_file.is_relative_to(b_path) or not prov_file.is_file():
             return False, f"File provenance của sản phẩm '{prod.get('name')}' không tồn tại: {prov_file}"
         try:
             prov = json.loads(prov_file.read_text(encoding="utf-8"))
@@ -195,16 +195,32 @@ def is_verified_real_batch(batch_dir: Path | str) -> tuple[bool, str]:
         except Exception as exc:
             return False, f"Không đọc được provenance của sản phẩm '{prod.get('name')}': {exc}"
 
+        local_import = (prov.get("acquisition_tool") == "spaiauto"
+                        and isinstance(prov.get("archive_sha256"), str)
+                        and len(prov["archive_sha256"]) == 64
+                        and all(c in "0123456789abcdef" for c in prov["archive_sha256"]))
+        reviewed_ids = rev.get("selected_asset_ids") or []
         for img_info in images:
             orig_url = str(img_info.get("original_url") or "")
-            if not orig_url or "example.com" in orig_url or orig_url.startswith("file://") or "dummy" in orig_url.lower():
+            if not local_import and (not orig_url or "example.com" in orig_url
+                                     or orig_url.startswith("file://") or "dummy" in orig_url.lower()):
                 return False, f"Ảnh {img_info.get('asset_id')} có URL giả lập hoặc không rõ nguồn: {orig_url}"
             rel_path = img_info.get("relative_path")
             if not rel_path:
                 return False, f"Ảnh {img_info.get('asset_id')} thiếu relative_path."
-            img_file = b_path / rel_path
-            if not img_file.is_file():
-                return False, f"File ảnh không tồn tại trên đĩa: {img_file}"
+            img_file = (b_path / rel_path).resolve()
+            if not img_file.is_relative_to(b_path) or not img_file.is_file():
+                return False, f"File ảnh không tồn tại trong Exchange: {img_file}"
+            if local_import:
+                if not isinstance(reviewed_ids, list) or img_info.get("asset_id") not in reviewed_ids:
+                    return False, f"Ảnh {img_info.get('asset_id')} chưa có trong biên nhận duyệt."
+                try:
+                    with img_file.open("rb") as stream:
+                        actual_sha = hashlib.file_digest(stream, "sha256").hexdigest()
+                except OSError as exc:
+                    return False, f"Không đọc được ảnh local: {exc}"
+                if img_info.get("sha256") != actual_sha:
+                    return False, f"SHA của ảnh local không khớp: {img_file}"
 
             try:
                 with Image.open(img_file) as im:

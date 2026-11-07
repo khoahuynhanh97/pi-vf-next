@@ -145,8 +145,10 @@ Tự động quét thư mục `runtime/vf/workspace/exports/`, giải mã video 
 .\Run.ps1 trigger --daemon --limit 1 --qc-level low
 ```
 
-Windows Task Scheduler chạy lệnh đầu lúc 06:30 giờ Bangkok. `--acquire` lấy ZIP
-và capture qua Spaiauto, đối chiếu ảnh với nguồn và chạy duyệt ảnh nhẹ trước khi giao cho VF.
+Windows Task Scheduler chạy lúc 06:30 giờ Bangkok. `--acquire` lấy ZIP và capture
+qua Spaiauto, giải nén một lần và chạy duyệt ảnh local trước khi giao cho VF.
+PI xóa ZIP mới sau khi đã lưu ảnh và biên nhận import. VF đọc ảnh theo
+`relative_path` và kiểm SHA-256 của file. URL ảnh riêng lẻ là dữ liệu tùy chọn từ lượt cũ.
 
 ### 5.6. Phục hồi workflow dở dang (Resume)
 

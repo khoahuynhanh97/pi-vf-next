@@ -2,6 +2,7 @@ import csv
 import io
 import json
 
+import pytest
 from openpyxl import Workbook
 
 from tools.selection_handoff import SHEETS
@@ -78,3 +79,68 @@ def test_scheduled_browser_failure_records_skip_without_retry(tmp_path, monkeypa
     assert row["reason_code"] == "browser_error"
     assert row["retryable"] is False
     assert len(calls) == 1
+
+
+
+@pytest.mark.parametrize("restart_before_review", [False, True])
+def test_scheduled_reviews_extracted_zip_without_source_urls_and_releases_zip(tmp_path, monkeypatch,
+                                                                             restart_before_review):
+    from pathlib import Path
+    from shutil import move
+    from io import BytesIO
+    from PIL import Image
+    from test_spaiauto_import import capture_files
+    from tools.spaiauto import scheduled
+
+    intake = run_daily(root=tmp_path / "daily", day="2026-11-02", db_path=tmp_path / "pi.db",
+                       fetch=lambda _: _workbook(11, 22),
+                       complete=lambda _: {"selected": [{"candidate_id": "shopee:11:22",
+                                                         "selection_reason": "Test candidate"}]})
+    run = Path(intake["run_dir"])
+
+    captures = []
+
+    def capture(url, incoming):
+        captures.append(url)
+        image = Image.new("RGB", (80, 90), "red")
+        image.paste((0, 100, 255), (0, 0, 40, 90))
+        data = BytesIO()
+        image.save(data, format="PNG")
+        for path, name in zip(capture_files(tmp_path / "browser", url=url, members={"local.png": data.getvalue()}),
+                              ("capture.json", "download.zip", "page.png")):
+            move(path, incoming / name)
+
+    def complete(messages, *, model):
+        context = json.loads(messages[-1]["content"][0]["text"])
+        assert context["allowed_asset_ids"]
+        assert not list(run.rglob("*.zip"))
+        return {"identity_verified": True, "note": "Matches selected product.",
+                "identity": {"brand": "Brand", "model": "Model", "variant": "Single", "category": "tech"},
+                "selected_asset_ids": context["allowed_asset_ids"]}
+
+    monkeypatch.setattr(scheduled, "_capture", capture)
+    if restart_before_review:
+        def interrupted(*args, **kwargs):
+            raise KeyboardInterrupt()
+        monkeypatch.setattr(scheduled, "_complete", interrupted)
+        with pytest.raises(KeyboardInterrupt):
+            scheduled.acquire_batch(run, hist_roots=[])
+        assert not list(run.rglob("*.zip"))
+    monkeypatch.setattr(scheduled, "_complete", complete)
+    scheduled.acquire_batch(run, hist_roots=[])
+    assert len(captures) == 1
+    row = json.loads((run / "intake.json").read_text(encoding="utf8"))["rows"][0]
+    assert row["status"] == "completed"
+    assert not list(run.rglob("*.zip"))
+    assert len(list(run.rglob("media/candidates/*.png"))) == 1
+    from tools.spaiauto.workflow import publish
+    batch = publish(run, tmp_path / "inbox", eligible_only=True)
+    manifest = json.loads((batch / "manifest.json").read_text(encoding="utf8"))
+    image = manifest["products"][0]["images"][0]
+    assert not image.get("original_url")
+    assert (batch / image["relative_path"]).is_file()
+    from tools.spark_intake import is_verified_real_batch
+    assert is_verified_real_batch(batch)[0]
+    with (batch / image["relative_path"]).open("ab") as stream:
+        stream.write(b"tampered")
+    assert not is_verified_real_batch(batch)[0]

@@ -142,6 +142,19 @@ def test_configured_mode_stops_before_generation_on_fixture_or_missing_real_batc
     assert is_real2 is True
     assert "hợp lệ" in reason2.lower() or "verified" in reason2.lower()
 
+    # Local-only Spaiauto import must pass without downloading image URLs.
+    image = real_manifest["products"][0]["images"][0]
+    del image["original_url"]
+    image["sha256"] = hashlib.sha256(real_img.read_bytes()).hexdigest()
+    prov.update(acquisition_tool="spaiauto", archive_sha256="a" * 64)
+    prov["review"]["selected_asset_ids"] = [image["asset_id"]]
+    (real_batch / "manifest.json").write_text(json.dumps(real_manifest), encoding="utf-8")
+    (real_batch / "products/real_p/provenance.json").write_text(json.dumps(prov), encoding="utf-8")
+    assert is_verified_real_batch(real_batch)[0]
+    with real_img.open("ab") as stream:
+        stream.write(b"tampered")
+    assert not is_verified_real_batch(real_batch)[0]
+
 
 # =============================================================================
 # Test 2: New Run Error Does Not Borrow Old Exports & Scheduler Dedupe

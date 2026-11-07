@@ -111,14 +111,14 @@ def import_capture(capture_file: Path, archive_file: Path, screenshot: Path,
     raw.mkdir()
     media.mkdir(parents=True)
     shutil.copy2(capture_file, raw / "capture.json")
-    shutil.copy2(archive_file, raw / "download.zip")
     shutil.copy2(screenshot, raw / "page.png")
-    hashes = {name: digest(raw / name) for name in ("capture.json", "download.zip", "page.png")}
+    hashes = {name: digest(raw / name) for name in ("capture.json", "page.png")}
+    archive_sha256 = digest(archive_file)
     atomic_json(raw / "checksums.json", hashes)
     assets, rejected = [], []
     sources = {a["archive_member"]: a.get("original_url") for a in data.get("asset_sources", [])}
     seen: dict[str, str] = {}
-    with zipfile.ZipFile(raw / "download.zip") as archive:
+    with zipfile.ZipFile(archive_file) as archive:
         entries = _check_archive(archive)
         for index, entry in enumerate(entries, start=1):
             if entry.is_dir():
@@ -156,10 +156,12 @@ def import_capture(capture_file: Path, archive_file: Path, screenshot: Path,
             assets.append({"asset_id": asset_id, "archive_member": entry.filename,
                            "sha256": sha, "width": width, "height": height,
                            "format": image_format.lower(), "absolute_path": str(target.resolve()),
+                           "relative_path": target.relative_to(destination).as_posix(),
                            "original_url": sources.get(entry.filename),
                            "match_status": "needs_semantic_review"})
     record = {"schema_version": 1, "imported_at": now(), "capture": data,
-              "raw_checksums": hashes, "assets": assets, "rejected": rejected}
+              "raw_checksums": hashes, "archive_sha256": archive_sha256,
+              "assets": assets, "rejected": rejected}
     atomic_json(destination / "import.json", record)
     atomic_json(destination / "review-template.json", {
         "capture_digest": digest(raw / "capture.json"), "reviewed_by": "", "note": "",
@@ -180,9 +182,11 @@ def verify_import(destination: Path) -> dict:
     if read_json(destination / "raw" / "capture.json") != record["capture"]:
         raise ValueError("Imported metadata differs from raw capture.")
     for asset in record["assets"]:
-        path = Path(asset["absolute_path"])
-        if not path.resolve().is_relative_to((destination / "media" / "candidates").resolve()):
+        relative = asset.get("relative_path")
+        path = (destination / relative).resolve() if relative else Path(asset["absolute_path"]).resolve()
+        if not path.is_relative_to((destination / "media" / "candidates").resolve()):
             raise ValueError("Asset path outside import directory.")
         if digest(path) != asset["sha256"]:
             raise ValueError(f"Image changed: {asset['asset_id']}")
+        asset["absolute_path"] = str(path)
     return record
