@@ -123,7 +123,8 @@ def test_normal_poll_binds_qc_tail_composes_and_reuses_with_content_receipt(tmp_
     assert len([event for event in events if event[0] == "submit"]) == 1
 
 
-def test_pinned_batch_membership_uses_latest_authorized_retry(tmp_path, monkeypatch):
+@pytest.mark.parametrize("repaired_batch", [False, True])
+def test_pinned_batch_membership_uses_latest_authorized_retry(tmp_path, monkeypatch, repaired_batch):
     batch, store, _, _ = setup_pipeline(tmp_path, monkeypatch)
     original = store.request_from_record(store.get("op2"))
     retried = replace(original, request_id="op2-attempt-2")
@@ -131,5 +132,78 @@ def test_pinned_batch_membership_uses_latest_authorized_retry(tmp_path, monkeypa
     with store.connection:
         store.connection.execute("UPDATE video_factory_scene_operation SET attempt=2 WHERE operation_id=?",
                                  (retried.request_id,))
+    if repaired_batch:
+        contexts = tmp_path / "workspace" / "creative_batches"
+        replacement = "batch_repaired"
+        (contexts / f"{replacement}.json").write_bytes((contexts / f"{batch}.json").read_bytes())
+        batch = replacement
     rows = server._creative_batch_operations(store.connection, batch)
     assert rows[1]["operation_id"] == retried.request_id
+
+
+@pytest.mark.parametrize("failure_at", ["submit", "poll", "restart", "unknown", "no_vertex", "unbound_vertex"])
+def test_batch_uses_vertex_only_after_confirmed_flow_rejection(tmp_path, monkeypatch, failure_at):
+    batch, store, flow, events = setup_pipeline(tmp_path, monkeypatch)
+    first = store.get("op1")
+    rejection = VideoGenerationResult(
+        "op2", "failed", "flow-project-2",
+        error_code="PUBLIC_ERROR_UNUSUAL_ACTIVITY", error_message="Flow rejected generation",
+    )
+
+    def submit_flow(request):
+        events.append(("flow_submit", request))
+        if failure_at == "poll":
+            return VideoGenerationResult(request.request_id, "submitted", "flow-project-2")
+        if failure_at == "unknown":
+            return replace(rejection, status="unknown", error_code="GOOGLE_FLOW_VIDEO_ACCEPTANCE_UNKNOWN")
+        return rejection
+
+    if failure_at == "restart":
+        store.bind_provider_kind("op2", "google_flow")
+        store.finalize_provider_result("op2", rejection)
+    if failure_at == "unbound_vertex":
+        store.bind_provider_kind("op2", "vertex_ai")
+    flow.submit = submit_flow
+    flow.get_status = lambda _: rejection
+
+    class Vertex:
+        provider_kind = "vertex_ai"
+
+        def is_available(self):
+            return True
+
+        def submit(self, request):
+            events.append(("vertex_submit", request))
+            return VideoGenerationResult(request.request_id, "completed", "vertex-2", first["output_path"])
+
+        def get_status(self, operation_id):
+            raise AssertionError("completed Vertex operation must never be polled")
+
+    providers = {"google_flow": flow, "vertex_ai": Vertex()}
+    if failure_at == "no_vertex":
+        del providers["vertex_ai"]
+    for _ in range(4):
+        result = server.get_job_status(batch, provider=providers, provider_kind="google_flow")
+        if result["status"] != "running":
+            break
+    if failure_at in {"unknown", "no_vertex", "unbound_vertex"}:
+        expected = {
+            "unknown": ("reconciliation_required", "GOOGLE_FLOW_VIDEO_ACCEPTANCE_UNKNOWN"),
+            "no_vertex": ("failed", "PUBLIC_ERROR_UNUSUAL_ACTIVITY"),
+            "unbound_vertex": ("failed", "PROVIDER_BINDING_MISMATCH"),
+        }
+        assert (result["status"], result["code"]) == expected[failure_at], result
+        assert store.get("op2-attempt-2") is None
+        assert not any(event[0] == "vertex_submit" for event in events)
+        return
+
+    assert result["status"] == "completed", result
+    assert result["final_review"]["verdict"] == "PASS"
+    assert result["scene_provider_kinds"] == ["google_flow", "vertex_ai"]
+    assert store.get("op1") == first
+    assert store.get("op2")["error_code"] == "PUBLIC_ERROR_UNUSUAL_ACTIVITY"
+    assert store.get("op2-attempt-2")["status"] == "completed"
+    repeated = server.get_job_status(batch, provider=providers, provider_kind="google_flow")
+    assert repeated["sha256"] == result["sha256"]
+    assert sum(event[0] == "flow_submit" for event in events) == (failure_at != "restart")
+    assert sum(event[0] == "vertex_submit" for event in events) == 1

@@ -562,6 +562,29 @@ class KeyframeRuntime:
                         error_message=existing["error_message"],
                     )
             if provider_operation_id:
+                submitted_at = existing.get("submitted_at")
+                if submitted_at and existing["status"] in ("submitting", "project_created", "unknown"):
+                    try:
+                        from datetime import datetime, timezone, timedelta
+                        submitted = datetime.fromisoformat(submitted_at.replace("Z", "+00:00"))
+                        if submitted.tzinfo is None:
+                            submitted = submitted.replace(tzinfo=timezone.utc)
+                        elapsed = datetime.now(timezone.utc) - submitted
+                        timeout_minutes = 5
+                        if elapsed > timedelta(minutes=timeout_minutes):
+                            timeout_result = KeyframeGenerationResult(
+                                operation_id=request.operation_id,
+                                status="failed",
+                                provider_operation_id=provider_operation_id,
+                                error_code="KEYFRAME_TIMEOUT_EXPIRED",
+                                error_message=f"Keyframe operation exceeded {timeout_minutes} minute timeout (elapsed: {int(elapsed.total_seconds())}s)",
+                            )
+                            self.store.save_result(request, timeout_result)
+                            if self.capacity_store:
+                                self.capacity_store.release_terminal(self.provider_kind, request.operation_id)
+                            return timeout_result
+                    except (ValueError, TypeError):
+                        pass
                 if self.capacity_store and not self.capacity_store.try_acquire(
                     provider_kind=self.provider_kind,
                     operation_id=request.operation_id,

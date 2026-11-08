@@ -2626,11 +2626,13 @@ def render(
             op_store.mark_planned(
                 req, render_batch_id=durable_batch_id, scene_order=frame.order
             )
+        batch_operations = _creative_batch_operations(op_conn, durable_batch_id) if is_four_agent else None
     finally:
         op_conn.close()
 
     # Now execute submissions via runtime
     waiting_for_capacity = False
+    pending_scene_fallback = False
     for request_index, (frame, req) in enumerate(compiled_requests):
         if request_index and sb_data.get('creative_mode') == 'four_agent' and sb_data.get('qc_level') == 'high':
             break
@@ -2638,6 +2640,8 @@ def render(
             operation_connection = sqlite3.connect(_db_path())
             try:
                 op_store = SceneRenderOperationStore(operation_connection)
+                if batch_operations and batch_operations[request_index]["operation_id"] != req.request_id:
+                    req = op_store.request_from_record(batch_operations[request_index])
                 runtime = SceneRenderRuntime(
                     store=op_store,
                     provider=provider_source,
@@ -2647,6 +2651,12 @@ def render(
                     capacity_limit=None,
                 )
                 result = runtime.run(req)
+                if (is_four_agent
+                        and (sb_data.get("backend_profile") or {}).get("provider_kind") == "google_flow"
+                        and op_store.is_flow_activity_rejection(op_store.get(req.request_id))):
+                    # Let status handling plan the replacement before another scene is submitted.
+                    pending_scene_fallback = True
+                    break
             finally:
                 operation_connection.close()
             if (
@@ -2695,7 +2705,7 @@ def render(
                 "code": "RENDER_SUBMIT_FAILED",
             }
 
-    if not submitted_op_ids and not waiting_for_capacity:
+    if not submitted_op_ids and not waiting_for_capacity and not pending_scene_fallback:
         return {
             "ok": False,
             "status": "failed",
@@ -2768,7 +2778,7 @@ def _creative_batch_operations(connection, job_id):
         latest = connection.execute(
             'SELECT * FROM video_factory_scene_operation WHERE render_batch_id=? AND scene_id=? '
             'AND project_id=? AND owner_user_id=? AND attempt>=? ORDER BY attempt DESC LIMIT 1',
-            (job_id, row['scene_id'], row['project_id'], row['owner_user_id'], row['attempt']),
+            (row['render_batch_id'] or job_id, row['scene_id'], row['project_id'], row['owner_user_id'], row['attempt']),
         ).fetchone()
         if latest is not None:
             row = latest
@@ -3117,6 +3127,32 @@ def get_job_status(
 
         completed_paths: list[Path] = []
         video_provider_source: Any | None = None
+        allow_flow_fallback = is_four_agent_batch and batch_provider_kind == "google_flow"
+
+        def handle_flow_rejection(operation: dict[str, Any] | None) -> dict[str, Any] | None:
+            if operation is None or not allow_flow_fallback or not op_store.is_flow_activity_rejection(operation):
+                return None
+            try:
+                source = video_provider_source
+                if source is None:
+                    source = _video_provider(provider_override=provider)
+                vertex, error = _provider_for_operation(source, {"provider_kind": "vertex_ai"})
+                if vertex is None or not VideoProviderSelector.is_available(vertex):
+                    return fail_batch(
+                        code=operation["error_code"],
+                        error=f"{operation['error_message']}; Vertex fallback unavailable: {error or 'provider not ready'}",
+                    )
+                retry = op_store.fallback_rejected_flow_scene(operation["operation_id"])
+                capacity_store.release_terminal("google_flow", operation["operation_id"])
+            except (ValueError, RenderProviderConfigurationError) as exc:
+                return fail_batch(
+                    code="VERTEX_FALLBACK_UNAVAILABLE",
+                    error=f"Flow rejected scene {operation['scene_id']}; could not prepare Vertex fallback: {exc}",
+                )
+            logger.info("Flow rejected %s (%s); Vertex fallback %s",
+                        operation["operation_id"], operation["error_code"], retry["operation_id"])
+            return {"ok": True, "status": "running", "job_id": job_id, "id": job_id}
+
         for op_index, op in enumerate(scene_ops):
             if op.get("error_code") == "OPERATOR_QUARANTINED_UNCERTAIN":
                 return {
@@ -3137,6 +3173,7 @@ def get_job_status(
                 and batch_provider_kind
                 and durable_scene_provider
                 and durable_scene_provider != batch_provider_kind
+                and not (allow_flow_fallback and op_store.is_rejected_flow_fallback(op))
             ):
                 return {
                     "ok": False, "status": "failed", "job_id": job_id,
@@ -3236,6 +3273,9 @@ def get_job_status(
                 continue
 
             if op_status == "failed":
+                fallback = handle_flow_rejection(op)
+                if fallback is not None:
+                    return fallback
                 return fail_batch(
                     code=op.get("error_code") or "SCENE_FAILED",
                     error=(
@@ -3273,7 +3313,7 @@ def get_job_status(
                     planned_result = SceneRenderRuntime(
                         store=op_store,
                         provider=video_provider_source,
-                        preferred_provider_kind=batch_provider_kind or provider_kind,
+                        preferred_provider_kind=durable_scene_provider or batch_provider_kind or provider_kind,
                         allow_pre_submit_fallback=not bool(batch_provider_kind or provider_kind),
                         capacity_store=capacity_store,
                         capacity_limit=None,
@@ -3315,6 +3355,9 @@ def get_job_status(
                         "code": planned_result.error_code or "RECONCILIATION_REQUIRED",
                         "error": planned_result.error_message or "provider outcome is uncertain; reconcile before retrying",
                     }
+                fallback = handle_flow_rejection(op_store.get(op_id))
+                if fallback is not None:
+                    return fallback
                 return fail_batch(
                     code=planned_result.error_code or "SCENE_FAILED",
                     error=planned_result.error_message or "planned scene submit failed",
@@ -3434,6 +3477,9 @@ def get_job_status(
                     )
                 if final_state.get("status") == "failed":
                     capacity_store.release_terminal(str(op.get("provider_kind") or ""), op_id)
+                    fallback = handle_flow_rejection(final_state)
+                    if fallback is not None:
+                        return fallback
                     return fail_batch(
                         code=final_state.get("error_code") or "SCENE_FAILED",
                         error=(
@@ -3500,6 +3546,9 @@ def get_job_status(
                 final_state = op_store.finalize_provider_result(op_id, sub_res)
                 capacity_store.release_terminal(str(op.get("provider_kind") or ""), op_id)
                 durable_state = op_store.get(op_id) or final_state
+                fallback = handle_flow_rejection(durable_state)
+                if fallback is not None:
+                    return fallback
                 return fail_batch(
                     code=durable_state.get("error_code")
                     or sub_res.error_code

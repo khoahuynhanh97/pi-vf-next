@@ -381,6 +381,7 @@ class VertexVideoProvider(VideoGenerationPort):
                 "bytesBase64Encoded": base64.b64encode(first.read_bytes()).decode("ascii"),
                 "mimeType": mime_for(first),
             }
+        if request.reference_image_paths and not request.provider_options.get("approved_keyframe"):
             # Visual grounding reference_images array for Veo
             ref_list = []
             for ref_p in request.reference_image_paths:

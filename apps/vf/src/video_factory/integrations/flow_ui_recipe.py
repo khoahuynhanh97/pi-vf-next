@@ -66,6 +66,8 @@ def ensure_manual_mode(page: Any, timeout_ms: int = 10000) -> None:
 
 def attach_reference_asset(page: Any, source: Path, output_dir: Path, timeout_ms: int) -> None:
     """Select a content-addressed asset in the already open reference picker."""
+    from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
+
     data = source.read_bytes()
     filename = 'flow-ref-' + hashlib.sha256(data).hexdigest() + source.suffix.lower()
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -74,15 +76,29 @@ def attach_reference_asset(page: Any, source: Path, output_dir: Path, timeout_ms
         raise RuntimeError('GOOGLE_FLOW_REFERENCE_SOURCE_CHANGED')
     if not upload_source.exists():
         upload_source.write_bytes(data)
-    assets = page.locator('button.asset-item:visible').filter(has_text=re.compile(
-        r'^' + re.escape(filename) + r'(?:\s*(?:H\u00ecnh \u1ea3nh|Image))?$'))
-    upload = unique(page.locator('button.sidebar-upload-btn:visible'),
-                    'GOOGLE_FLOW_REFERENCE_UPLOAD_NOT_UNIQUE', timeout_ms)
+    cards = page.locator('button.asset-item:visible')
+    titles = page.locator('.asset-title')
+    exact_name = re.escape(filename)
+    titled = cards.filter(has=titles.filter(has_text=re.compile(r'^\s*' + exact_name + r'\s*$')))
+    legacy = cards.filter(has_not=titles).filter(has_text=re.compile(
+        r'^' + exact_name + r'(?:\s*(?:H\u00ecnh \u1ea3nh|Image))?$'))
+    assets = titled.or_(legacy)
     if assets.count() == 0:
+        upload = unique(page.locator('button.sidebar-upload-btn:visible'),
+                        'GOOGLE_FLOW_REFERENCE_UPLOAD_NOT_UNIQUE', timeout_ms)
         with page.expect_file_chooser(timeout=timeout_ms) as chooser:
             upload.click(timeout=timeout_ms)
         chooser.value.set_files(str(upload_source))
-    asset = unique(assets, 'GOOGLE_FLOW_REFERENCE_ASSET_NOT_UNIQUE', timeout_ms)
+    code = 'GOOGLE_FLOW_REFERENCE_ASSET_NOT_UNIQUE'
+    try:
+        assets.first.wait_for(state='visible', timeout=timeout_ms)
+        asset = assets.filter(has_not_text=re.compile(r'Uploading|\u0110ang t\u1ea3i l\u00ean', re.I))
+        asset.first.wait_for(state='visible', timeout=timeout_ms)
+    except PlaywrightTimeoutError as exc:
+        raise RuntimeError(f'{code}: matches={assets.count()}; no ready asset') from exc
+    matches = assets.count()
+    if matches != 1:
+        raise RuntimeError(f'{code}: matches={matches}')
     if 'asset-item-active' not in (asset.get_attribute('class') or '').split():
         asset.click(timeout=timeout_ms)
     page.wait_for_timeout(300)

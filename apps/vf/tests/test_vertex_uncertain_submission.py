@@ -1,8 +1,38 @@
+import base64
+from types import SimpleNamespace
+
 from video_factory.integrations.ports import VideoGenerationRequest
 from video_factory.integrations.vertex_provider import VertexVideoProvider
 from video_factory.integrations.provider_selection import VideoProviderSelector
 from video_factory.handlers.common import _paid_render_send_count
 import sqlite3
+
+
+def test_vertex_sends_approved_scene_keyframe_as_first_frame(tmp_path):
+    image = tmp_path / "start.png"
+    image.write_bytes(b"approved PNG bytes")
+    requests = []
+
+    def post(_url, **kwargs):
+        requests.append(kwargs["json"])
+        return SimpleNamespace(status_code=200, json=lambda: {"name": "operations/vertex"})
+
+    provider = VertexVideoProvider(
+        model="veo-3.1-generate-001", post_fn=post,
+        credential_resolver=lambda: ("offline", "project"), output_dir=tmp_path,
+    )
+    result = provider.submit(VideoGenerationRequest(
+        "scene-vertex", "owner", "project", "scene-1", "Keep the product in frame", 8,
+        reference_image_paths=(str(image),), aspect_ratio="9:16",
+        provider_options={"approved_keyframe": {"frame_id": "start"}},
+    ))
+
+    assert result.status == "submitted"
+    assert requests[0]["instances"] == [{
+        "prompt": "Keep the product in frame",
+        "image": {"bytesBase64Encoded": base64.b64encode(image.read_bytes()).decode(), "mimeType": "image/png"},
+    }]
+    assert requests[0]["parameters"] == {"durationSeconds": 8, "generateAudio": False, "aspectRatio": "9:16"}
 
 
 def test_vertex_post_timeout_is_unknown_and_pinned_for_reconciliation(tmp_path):

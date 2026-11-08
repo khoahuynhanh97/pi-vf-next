@@ -1495,6 +1495,7 @@ def test_recovery_without_operation_id_rejected_at_interface(tmp_path: Path):
         "GOOGLE_FLOW_NEW_PROJECT_SELECTOR_NOT_UNIQUE",
         "GOOGLE_FLOW_AUTH_REQUIRED",
         "GOOGLE_FLOW_IMAGE_MODE_SELECTOR_NOT_UNIQUE",
+        "GOOGLE_FLOW_REFERENCE_ASSET_NOT_UNIQUE",
     ),
 )
 def test_verified_presend_flow_failure_can_be_recovered_without_provider_status_lookup(

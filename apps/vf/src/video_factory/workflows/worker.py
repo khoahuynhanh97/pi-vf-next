@@ -26,6 +26,14 @@ def _tick_ui_maintenance(connection):
         configured_maintenance(connection)
     except Exception as maintenance_error:
         logger.warning('Flow maintenance tick stopped (%s)', type(maintenance_error).__name__)
+    try:
+        from video_factory.integrations.capacity import ProviderCapacityStore
+        store = ProviderCapacityStore(connection)
+        reclaimed = store.reclaim_expired_operations(timeout_minutes=10)
+        if reclaimed > 0:
+            logger.info('Reclaimed %d expired operation capacity slots', reclaimed)
+    except Exception as reclaim_error:
+        logger.warning('Operation capacity reclaim failed (%s)', type(reclaim_error).__name__)
 
 
 def _should_pause_worker(

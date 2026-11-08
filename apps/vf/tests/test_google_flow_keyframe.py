@@ -252,10 +252,14 @@ def test_generated_output_download_skips_existing_reference_tile(tmp_path, gener
             return bool(self.items) and self.items[0].is_visible()
 
     class FakeTile:
-        def __init__(self, img):
+        def __init__(self, img, *, generated=False):
             self.img = img
+            self.generated = generated
 
         def locator(self, selector):
+            if "Reuse prompt" in selector:
+                assert 'button[aria-label="Sử dụng lại câu lệnh"]' in selector
+                return FakeCollection([object()] if self.generated else [])
             assert selector == "img"
             return FakeCollection([self.img])
 
@@ -277,7 +281,9 @@ def test_generated_output_download_skips_existing_reference_tile(tmp_path, gener
             if selector == "flow-image-tile":
                 return FakeCollection([
                     FakeTile(FakeImage(reference_src)),
-                    FakeTile(FakeImage(generated_src)),
+                    FakeTile(FakeImage(generated_src), generated=True),
+                    # The reference enters the grid after the pre-Send snapshot.
+                    FakeTile(FakeImage("https://flow.google.com/media/late-reference.png=s512")),
                 ])
             raise AssertionError(f"unexpected selector {selector}")
 
@@ -736,10 +742,13 @@ def test_flow_keyframe_preview_click_download_branch(tmp_path):
             mock_img.count.return_value = 1
             mock_img.is_visible.return_value = True
             mock_img.first.get_attribute.return_value = "https://flow.google.com/media/generated.png=s512"
-            loc.locator.side_effect = lambda sub_sel: mock_img if sub_sel == "img" else (
-                # more buttons returns 0 to force preview click branch
-                MagicMock(count=MagicMock(return_value=0), is_visible=MagicMock(return_value=False))
-            )
+            def tile_locator(sub_sel):
+                if sub_sel == "img":
+                    return mock_img
+                # No More menu, forcing the preview click branch.
+                return MagicMock(count=MagicMock(return_value=int("Reuse prompt" in sub_sel)))
+
+            loc.locator.side_effect = tile_locator
         elif "Download" in sel or "Tải xuống" in sel:
             loc.count.return_value = 1
             loc.is_visible.return_value = True

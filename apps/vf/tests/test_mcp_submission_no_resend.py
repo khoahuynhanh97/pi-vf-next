@@ -2,6 +2,17 @@
 import pytest
 
 from video_factory import mcp_adapters
+from video_factory.job_contracts import TerminalJobError
+
+
+def test_flow_provider_rejection_preserves_specific_terminal_code():
+    with pytest.raises(TerminalJobError) as failure:
+        mcp_adapters._check_for_errors({
+            "status": "failed",
+            "code": "PUBLIC_ERROR_UNUSUAL_ACTIVITY",
+            "error": "Google Flow rejected the video request as unusual activity",
+        })
+    assert failure.value.code == "PUBLIC_ERROR_UNUSUAL_ACTIVITY"
 
 
 @pytest.mark.parametrize('outcome', ['timeout', 'empty', 'content'])

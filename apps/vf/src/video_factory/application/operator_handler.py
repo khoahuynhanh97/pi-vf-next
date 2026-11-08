@@ -1952,6 +1952,7 @@ def recover_unknown_keyframe_submission(
         "GOOGLE_FLOW_916_SELECTOR_NOT_UNIQUE",
         "GOOGLE_FLOW_916_UNVERIFIED",
         "GOOGLE_FLOW_SETTINGS_SAVE_SELECTOR_NOT_UNIQUE",
+        "GOOGLE_FLOW_REFERENCE_ASSET_NOT_UNIQUE",
     )
     presend_failure_code = next(
         (code for code in presend_failure_codes if code in last_error), None

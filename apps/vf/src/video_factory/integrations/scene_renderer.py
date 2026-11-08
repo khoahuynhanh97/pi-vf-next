@@ -466,8 +466,62 @@ class SceneRenderOperationStore:
     def retry_reconciled_flow_scene_on_vertex(
         self, operation_id: str, *, reconciliation_evidence: str
     ) -> dict[str, Any]:
-        """Create a new attempt only after an operator rules out an accepted Flow render."""
-        if not reconciliation_evidence.strip():
+        return self._retry_reconciled_flow_scene(
+            operation_id, reconciliation_evidence=reconciliation_evidence, provider_kind="vertex_ai",
+        )
+
+    def fallback_rejected_flow_scene(self, operation_id: str) -> dict[str, Any]:
+        return self._retry_reconciled_flow_scene(
+            operation_id, reconciliation_evidence="", provider_kind="vertex_ai",
+            confirmed_rejection=True,
+        )
+
+    def is_rejected_flow_fallback(self, operation: dict[str, Any]) -> bool:
+        attempt = int(operation["attempt"])
+        if attempt < 2 or operation["provider_kind"] != "vertex_ai":
+            return False
+        original_id, suffix, retry_attempt = operation["operation_id"].rpartition("-attempt-")
+        if not suffix or retry_attempt != str(attempt):
+            return False
+        original = self.get(original_id)
+        if not original or not self.is_flow_activity_rejection(original):
+            return False
+        request = replace(self.request_from_record(original), request_id=operation["operation_id"])
+        return (
+            original["attempt"] == attempt - 1
+            and all(original[key] == operation[key] for key in (
+                "render_batch_id", "owner_user_id", "project_id", "scene_id", "scene_order",
+                "expected_duration_seconds", "expected_aspect_ratio",
+            ))
+            and operation["request_digest"] == stable_scene_request_digest(request)
+        )
+
+    @staticmethod
+    def is_flow_activity_rejection(operation: dict[str, Any] | None) -> bool:
+        return (
+            operation is not None
+            and operation["status"] == "failed"
+            and operation["provider_kind"] == "google_flow"
+            and operation["error_code"] == "PUBLIC_ERROR_UNUSUAL_ACTIVITY"
+            and bool(operation["provider_operation_id"])
+            and bool(operation["render_batch_id"])
+            and not operation["output_path"]
+            and not operation["output_sha256"]
+        )
+
+    def retry_reconciled_flow_scene(
+        self, operation_id: str, *, reconciliation_evidence: str
+    ) -> dict[str, Any]:
+        return self._retry_reconciled_flow_scene(
+            operation_id, reconciliation_evidence=reconciliation_evidence, provider_kind="google_flow",
+        )
+
+    def _retry_reconciled_flow_scene(
+        self, operation_id: str, *, reconciliation_evidence: str, provider_kind: str,
+        confirmed_rejection: bool = False,
+    ) -> dict[str, Any]:
+        """Create a new attempt after confirmed rejection or operator reconciliation."""
+        if not confirmed_rejection and not reconciliation_evidence.strip():
             raise ValueError("Flow reconciliation evidence is required")
         self.connection.execute("BEGIN IMMEDIATE")
         try:
@@ -478,12 +532,19 @@ class SceneRenderOperationStore:
             if row is None:
                 raise ValueError("scene operation not found")
             old = dict(row)
+            if confirmed_rejection and not self.is_flow_activity_rejection(old):
+                raise ValueError("Flow operation has no confirmed unusual activity rejection")
             if old["provider_kind"] != "google_flow" or not old["provider_operation_id"]:
                 raise ValueError("only a pinned Flow operation can use this recovery")
             if old["status"] not in {"submitted", "running", "failed"}:
                 raise ValueError("Flow operation is not eligible for reconciled recovery")
             if old["output_path"] or old["output_sha256"]:
                 raise ValueError("Flow operation already has output")
+            if provider_kind == "google_flow" and (
+                old["status"] != "failed" or old["attempt"] != 1
+                or old["error_code"] not in {"SCENE_TIMEOUT_EXPIRED", "OPERATOR_RECONCILED_FAILED"}
+            ):
+                raise ValueError("Flow can only retry a reconciled initial scene timeout")
             request = self.request_from_record(old)
             next_attempt = int(old["attempt"]) + 1
             retry = replace(request, request_id=f"{operation_id}-attempt-{next_attempt}")
@@ -493,11 +554,14 @@ class SceneRenderOperationStore:
                 (retry.request_id,),
             ).fetchone()
             if existing:
-                if old["error_code"] != "OPERATOR_RECONCILED_FAILED" or dict(existing)["request_digest"] != retry_digest:
+                if ((not confirmed_rejection and old["error_code"] != "OPERATOR_RECONCILED_FAILED")
+                        or dict(existing)["request_digest"] != retry_digest
+                        or dict(existing)["provider_kind"] != provider_kind):
                     raise ValueError("scene recovery conflicts with an existing attempt")
                 self.connection.commit()
                 return dict(existing)
-            if old["status"] == "failed" and old["error_code"] != "OPERATOR_RECONCILED_FAILED":
+            if (not confirmed_rejection and old["status"] == "failed" and old["error_code"] != "OPERATOR_RECONCILED_FAILED"
+                    and provider_kind != "google_flow"):
                 raise ValueError("Flow failure is not operator-reconciled")
             active = self.connection.execute(
                 "SELECT COUNT(*) FROM video_factory_scene_operation "
@@ -506,12 +570,13 @@ class SceneRenderOperationStore:
             ).fetchone()[0]
             if active:
                 raise ValueError("a newer scene attempt already exists")
-            self.connection.execute(
-                "UPDATE video_factory_scene_operation SET status = 'failed', "
-                "error_code = 'OPERATOR_RECONCILED_FAILED', error_message = ?, updated_at = CURRENT_TIMESTAMP "
-                "WHERE operation_id = ? AND status IN ('submitted', 'running', 'failed')",
-                (reconciliation_evidence, operation_id),
-            )
+            if not confirmed_rejection:
+                self.connection.execute(
+                    "UPDATE video_factory_scene_operation SET status = 'failed', "
+                    "error_code = 'OPERATOR_RECONCILED_FAILED', error_message = ?, updated_at = CURRENT_TIMESTAMP "
+                    "WHERE operation_id = ? AND status IN ('submitted', 'running', 'failed')",
+                    (reconciliation_evidence, operation_id),
+                )
             self.connection.execute(
                 """
                 INSERT INTO video_factory_scene_operation (
@@ -520,13 +585,13 @@ class SceneRenderOperationStore:
                     error_code, error_message, render_batch_id, scene_order, attempt,
                     expected_duration_seconds, expected_aspect_ratio, provider_kind,
                     request_json, updated_at
-                ) VALUES (?, ?, ?, ?, ?, NULL, 'planned', NULL, '', '', '', ?, ?, ?, ?, ?, 'vertex_ai', ?, CURRENT_TIMESTAMP)
+                ) VALUES (?, ?, ?, ?, ?, NULL, 'planned', NULL, '', '', '', ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
                 """,
                 (
                     retry.request_id, old["owner_user_id"], old["project_id"],
                     old["scene_id"], retry_digest, old["render_batch_id"],
                     old["scene_order"], next_attempt, old["expected_duration_seconds"],
-                    old["expected_aspect_ratio"], json.dumps(asdict(retry), sort_keys=True),
+                    old["expected_aspect_ratio"], provider_kind, json.dumps(asdict(retry), sort_keys=True),
                 ),
             )
             result = self.get(retry.request_id)
@@ -1156,12 +1221,12 @@ class SceneRenderOperationStore:
             cursor = self.connection.execute(
                 "UPDATE video_factory_scene_operation SET error_code='OPERATOR_QUARANTINED_UNCERTAIN', "
                 "error_message=?, updated_at=CURRENT_TIMESTAMP WHERE operation_id=? "
-                "AND status IN ('submitted','running') AND provider_kind='google_flow' "
+                "AND status IN ('submitting','submitted','running') AND provider_kind='google_flow' "
                 "AND COALESCE(provider_operation_id,'') != ''",
                 (evidence.strip(), operation_id),
             )
             if cursor.rowcount != 1:
-                raise ValueError("only a bound, unresolved submitted operation can be quarantined")
+                raise ValueError("only a bound, unresolved Flow submission can be quarantined")
             lease = self.connection.execute(
                 "SELECT lease_expires_at,lease_owner FROM video_factory_provider_capacity WHERE operation_id=?",
                 (operation_id,),
@@ -1219,6 +1284,22 @@ class SceneRenderOperationStore:
                 )
             else:
                 raise ValueError(f"Unknown reconciliation action: {action}")
+        return dict(self.get(operation_id))
+
+    def clear_quarantine(self, operation_id: str) -> dict[str, Any]:
+        """Reset OPERATOR_QUARANTINED_UNCERTAIN to allow resubmission."""
+        existing = self.get(operation_id)
+        if not existing:
+            raise ValueError(f"Operation {operation_id} not found")
+        if existing.get("error_code") != "OPERATOR_QUARANTINED_UNCERTAIN":
+            raise ValueError(f"Operation {operation_id} is not quarantined")
+        with self.connection:
+            self.connection.execute(
+                "UPDATE video_factory_scene_operation SET status='planned', error_code='', "
+                "error_message='', provider_operation_id='', provider_kind='', updated_at=CURRENT_TIMESTAMP "
+                "WHERE operation_id=?",
+                (operation_id,),
+            )
         return dict(self.get(operation_id))
 
 
@@ -1444,6 +1525,28 @@ class SceneRenderRuntime:
             if provider_operation_id:
                 if not self._admit_capacity(request, selected, reconciled_takeover=True):
                     return self._capacity_wait(request)
+                submitted_at = existing.get("submitted_at")
+                if submitted_at and existing["status"] in ("submitted", "running"):
+                    try:
+                        from datetime import datetime, timezone, timedelta
+                        submitted = datetime.fromisoformat(submitted_at.replace("Z", "+00:00"))
+                        if submitted.tzinfo is None:
+                            submitted = submitted.replace(tzinfo=timezone.utc)
+                        elapsed = datetime.now(timezone.utc) - submitted
+                        timeout_minutes = 5
+                        if elapsed > timedelta(minutes=timeout_minutes):
+                            timeout_result = VideoGenerationResult(
+                                request_id=request.request_id,
+                                status="failed",
+                                error_code="SCENE_TIMEOUT_EXPIRED",
+                                error_message=f"Scene operation exceeded {timeout_minutes} minute timeout (elapsed: {int(elapsed.total_seconds())}s)",
+                            )
+                            self.store.save_result(request, timeout_result)
+                            if self.capacity_store:
+                                self.capacity_store.release_terminal(selected.kind, request.request_id)
+                            return timeout_result
+                    except (ValueError, TypeError):
+                        pass
                 result = selected.provider.get_status(provider_operation_id)
                 result = replace(result, request_id=request.request_id)
                 result = self._with_provider_kind(result, selected.kind)

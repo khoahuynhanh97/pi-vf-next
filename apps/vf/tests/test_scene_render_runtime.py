@@ -72,6 +72,64 @@ def _request(
     )
 
 
+def test_quarantine_inactive_flow_scene_preserves_unconfirmed_submit(tmp_path: Path) -> None:
+    from video_factory.integrations.capacity import ProviderCapacityStore
+
+    image = tmp_path / "start.png"
+    image.write_bytes(b"keyframe")
+    request = _request(image)
+    project = "https://flow.google.com/project/00000000-0000-0000-0000-000000000001"
+    with sqlite3.connect(":memory:") as connection:
+        store = SceneRenderOperationStore(connection)
+        capacity = ProviderCapacityStore(connection)
+        store.mark_planned(request, render_batch_id="batch-1", scene_order=1)
+        with connection:
+            connection.execute(
+                "UPDATE video_factory_scene_operation SET status='submitting', provider_kind='google_flow', "
+                "provider_operation_id=? WHERE operation_id=?",
+                (project, request.request_id),
+            )
+            connection.execute(
+                "INSERT INTO video_factory_provider_capacity VALUES (?, ?, ?, ?, ?, ?)",
+                ("google_flow", request.request_id, "", "0:inactive", 0, project),
+            )
+        result = store.quarantine_inactive_submission(
+            request.request_id, evidence="Exact project inspected after the worker exited", confirmed_inactive=True,
+        )
+        assert result["status"] == "submitting"
+        assert result["provider_operation_id"] == project
+        assert result["error_code"] == "OPERATOR_QUARANTINED_UNCERTAIN"
+        assert capacity.active("google_flow") == []
+
+
+def test_operator_can_retry_one_reconciled_flow_timeout(tmp_path: Path) -> None:
+    image = tmp_path / "start.png"
+    image.write_bytes(b"keyframe")
+    request = _request(image)
+    project = "https://flow.google.com/project/00000000-0000-0000-0000-000000000001"
+    with sqlite3.connect(":memory:") as connection:
+        store = SceneRenderOperationStore(connection)
+        store.mark_planned(request, render_batch_id="batch-1", scene_order=1)
+        with connection:
+            connection.execute(
+                "UPDATE video_factory_scene_operation SET status='failed', provider_kind='google_flow', "
+                "provider_operation_id=?, error_code='SCENE_TIMEOUT_EXPIRED' WHERE operation_id=?",
+                (project, request.request_id),
+            )
+        with pytest.raises(ValueError, match="evidence"):
+            store.retry_reconciled_flow_scene(request.request_id, reconciliation_evidence="")
+        retry = store.retry_reconciled_flow_scene(
+            request.request_id, reconciliation_evidence="Project contains only START; credit activity verified."
+        )
+        assert retry["provider_kind"] == "google_flow"
+        assert retry["attempt"] == 2
+        assert retry["status"] == "planned"
+        assert retry["provider_operation_id"] is None
+        assert store.request_from_record(retry) == replace(request, request_id=retry["operation_id"])
+        assert store.get(request.request_id)["provider_operation_id"] == project
+        assert store.get(request.request_id)["error_code"] == "OPERATOR_RECONCILED_FAILED"
+
+
 def test_compile_scene_uses_only_generated_keyframe_and_excludes_overlay_text(
     tmp_path: Path,
 ) -> None:

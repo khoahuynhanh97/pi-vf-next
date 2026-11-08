@@ -243,3 +243,55 @@ class ProviderCapacityStore:
             "SELECT * FROM video_factory_provider_capacity WHERE provider_kind=?",
             (provider_kind,),
         )]
+
+    def reclaim_expired_operations(self, *, timeout_minutes: int = 10) -> int:
+        """Reclaim capacity slots from keyframe/scene operations stuck beyond timeout."""
+        from datetime import datetime, timezone, timedelta
+        cutoff = (datetime.now(timezone.utc) - timedelta(minutes=timeout_minutes)).isoformat()
+        count = 0
+        self.connection.execute("BEGIN IMMEDIATE")
+        try:
+            for table, statuses, code_prefix in [
+                ("video_factory_keyframe_operation", ("submitting", "project_created", "unknown"), "KEYFRAME"),
+                ("video_factory_scene_operation", ("submitted", "running"), "SCENE"),
+            ]:
+                exists = self.connection.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)
+                ).fetchone()
+                if not exists:
+                    continue
+                status_list = ",".join(f"'{s}'" for s in statuses)
+                expired = self.connection.execute(
+                    f"""SELECT operation_id, provider_kind, submitted_at FROM {table}
+                        WHERE status IN ({status_list})
+                          AND submitted_at IS NOT NULL
+                          AND submitted_at < ?""",
+                    (cutoff,),
+                ).fetchall()
+                for row in expired:
+                    operation_id = row["operation_id"]
+                    provider_kind = row["provider_kind"]
+                    submitted_at = row["submitted_at"]
+                    try:
+                        submitted = datetime.fromisoformat(submitted_at.replace("Z", "+00:00"))
+                        elapsed = datetime.now(timezone.utc) - submitted
+                        self.connection.execute(
+                            f"""UPDATE {table}
+                               SET status='failed', error_code='{code_prefix}_TIMEOUT_EXPIRED',
+                                   error_message=?, updated_at=CURRENT_TIMESTAMP
+                               WHERE operation_id=? AND status IN ({status_list})""",
+                            (f"{code_prefix} exceeded {timeout_minutes}min timeout (elapsed: {int(elapsed.total_seconds())}s)", operation_id),
+                        )
+                        if self.connection.execute("SELECT changes()").fetchone()[0] > 0:
+                            self.connection.execute(
+                                "DELETE FROM video_factory_provider_capacity WHERE provider_kind=? AND operation_id=?",
+                                (provider_kind, operation_id),
+                            )
+                            count += 1
+                    except (ValueError, TypeError):
+                        pass
+            self.connection.commit()
+            return count
+        except Exception:
+            self.connection.rollback()
+            raise

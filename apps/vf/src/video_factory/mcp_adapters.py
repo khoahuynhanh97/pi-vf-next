@@ -264,6 +264,8 @@ def _check_for_errors(obj: Any) -> None:
             )
         if obj.get("status") in ("failed", "error", "cancelled"):
             err_msg = obj.get("error") or obj.get("message") or f"Operation terminated with status '{obj.get('status')}'"
+            if obj.get("code") == "PUBLIC_ERROR_UNUSUAL_ACTIVITY":
+                raise TerminalJobError(err_msg, code="PUBLIC_ERROR_UNUSUAL_ACTIVITY")
             raise TerminalJobError(f"Tool operation failed with status '{obj.get('status')}': {err_msg}", code="TOOL_OPERATION_TERMINAL_FAILED")
 
         if obj.get("isError") is True or obj.get("is_error") is True:

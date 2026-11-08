@@ -1,5 +1,9 @@
 import threading
 
+from video_factory.integrations.domain import RenderBatch
+from video_factory.integrations.ports import VideoGenerationRequest
+from video_factory.integrations.repository import SQLiteVideoFactoryRepository
+from video_factory.integrations.scene_renderer import SceneRenderOperationStore
 from video_factory.storage_infra.sqlite import connect
 from video_factory.workflows import worker
 from video_factory.workflows.outbox_dispatcher import DispatchReport
@@ -23,10 +27,19 @@ def test_item_pause_scope_excludes_only_paused_workflow(tmp_path):
 
 
 def test_capacity_pause_keeps_active_operations_dispatchable_for_unfiltered_and_mixed_workers(tmp_path):
-    conn = connect(tmp_path / "capacity-scope.db")
+    path = tmp_path / "capacity-scope.db"
+    conn = connect(path)
     _workflows(conn)
-    conn.execute("CREATE TABLE video_factory_scene_operation (workflow_id TEXT, operation_id TEXT, status TEXT)")
-    conn.execute("INSERT INTO video_factory_scene_operation VALUES ('wf-A','op-active','running')")
+    repository = SQLiteVideoFactoryRepository(path)
+    repository.save_render_batch(RenderBatch("batch-active", "owner", "wf-A", "project"))
+    store = SceneRenderOperationStore(conn)
+    request = VideoGenerationRequest("op-active", "owner", "project", "scene", "approved prompt", 8)
+    store.mark_planned(request, render_batch_id="batch-active", scene_order=1)
+    store.claim_provider_for_submission(request, "vertex_ai")
+    store.bind_provider_operation_id(request.request_id, "operations/active")
+    with conn:
+        conn.execute("UPDATE video_factory_scene_operation SET status='submitted' WHERE operation_id=?",
+                     (request.request_id,))
     pause = {"code": "PROVIDER_CAPACITY_WAIT", "workflow_id": "wf-B"}
 
     assert worker._should_pause_worker(pause, None, connection=conn) is False

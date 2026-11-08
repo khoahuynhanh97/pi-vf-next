@@ -41,6 +41,11 @@ class GoogleFlowKeyframeProvider(KeyframeGenerationPort):
         "Do not add black bars, borders, padding, or an inset square image."
     )
 
+    _GENERATED_TILE_MARKER = (
+        'button.reuse-button, button[aria-label="Reuse prompt" i], '
+        'button[aria-label="Sử dụng lại câu lệnh"]'
+    )
+
     def __init__(
         self,
         profile_path: Path | str | None = None,
@@ -531,11 +536,13 @@ class GoogleFlowKeyframeProvider(KeyframeGenerationPort):
             if tiles.count() == 0:
                 tiles = page.locator("flow-tile-container")
 
-            target_tile = None
-            # Flow keeps uploaded reference tiles alongside generated results.
-            # Only select a visible tile whose image URL was absent before Send.
-            for i in reversed(range(tiles.count())):
+            generated_tiles = []
+            # Uploaded references can appear in the grid after Send. A new URL
+            # alone cannot identify a generation; Flow puts Reuse Prompt on results.
+            for i in range(tiles.count()):
                 candidate = tiles.nth(i)
+                if candidate.locator(self._GENERATED_TILE_MARKER).count() == 0:
+                    continue
                 img = candidate.locator("img")
                 if img.count() != 1 or not img.is_visible():
                     continue
@@ -543,10 +550,10 @@ class GoogleFlowKeyframeProvider(KeyframeGenerationPort):
                 if source and source not in initial_sources:
                     if expected_source and source != expected_source:
                         continue
-                    target_tile = candidate
-                    break
+                    generated_tiles.append(candidate)
 
-            if target_tile is not None:
+            if len(generated_tiles) == 1:
+                target_tile = generated_tiles[0]
                 img_candidates = target_tile.locator("img")
                 if img_candidates.count() == 1 and img_candidates.is_visible():
                     raw_src = img_candidates.first.get_attribute("src") or ""
@@ -660,7 +667,7 @@ class GoogleFlowKeyframeProvider(KeyframeGenerationPort):
             if label in expected_references:
                 observed_references.add(label)
                 reference_sources.add(src)
-            else:
+            elif tile.locator(self._GENERATED_TILE_MARKER).count():
                 generated_sources.append(src)
         if observed_references != expected_references:
             return reference_sources, None

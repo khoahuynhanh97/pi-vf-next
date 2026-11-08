@@ -96,6 +96,7 @@ def test_nonpaid_settings_can_be_selected_while_popup_is_animating(page, adapter
 @pytest.mark.parametrize('missing_x1,cost,error', [
     (True, True, 'OUTPUT_COUNT'), (False, False, 'COST')])
 def test_missing_control_or_cost_blocks_before_send(page, adapter, missing_x1, cost, error):
+    adapter.timeout_ms = 3000
     page.set_content(settings_html(missing_x1=missing_x1, cost=cost))
     with pytest.raises(RuntimeError, match=error):
         adapter._configure_project(page, request())
@@ -132,8 +133,18 @@ def test_existing_project_without_video_never_automatically_sends_again(adapter,
     generate.assert_not_called()
 
 
-def _generate_page(page, *, prompt='test', on_send="document.body.insertAdjacentHTML(`beforeend`, `<flow-pending-tile style='display:block;width:100px;height:40px'><mat-icon>movie</mat-icon></flow-pending-tile>`)"):
+_VIDEO_PENDING = '<flow-pending-tile style="display:block;width:100px;height:40px"><mat-icon>movie</mat-icon></flow-pending-tile>'
+_FLOW_PROJECT_URL = 'https://flow.google.com/project/00000000-0000-0000-0000-000000000001'
+
+
+def _generate_page(page, *, prompt='test', on_send=None, persisted_video=True):
     page.set_default_timeout(5000)
+    if on_send is None:
+        on_send = "document.body.insertAdjacentHTML(`beforeend`, `" + _VIDEO_PENDING.replace('"', "'") + "`)"
+    page.context.route(_FLOW_PROJECT_URL, lambda route: route.fulfill(
+        content_type='text/html',
+        body=_VIDEO_PENDING if persisted_video else '<flow-image-tile>Reference</flow-image-tile>',
+    ))
     page.set_content('''<div class="ProseMirror" contenteditable="true" style="position:fixed;top:50px;left:50px;width:300px;height:40px">''' + prompt + '''</div>
       <button class="settings-trigger-button">Video 8s x1</button>
       <button class="generate-icon-button" onclick="window.sendCount=(window.sendCount||0)+1;''' + on_send + '''">Send</button>''')
@@ -178,6 +189,93 @@ def test_generate_accepts_video_pending_after_single_send(page, adapter):
          patch.object(adapter, '_credit_balance_on_page', return_value=100):
         result = adapter._generate(page, request(), 'https://flow.google.com/project/00000000-0000-0000-0000-000000000001', 12)
     assert result.status == 'submitted'
+    assert page.evaluate('window.sendCount') == 1
+
+
+def test_generate_requires_pending_video_to_survive_project_reopen(page, adapter):
+    _generate_page(page, persisted_video=False)
+    with patch.object(adapter, '_assert_start_frame'), \
+         patch.object(adapter, '_credit_balance_on_page', return_value=100):
+        with pytest.raises(RuntimeError) as exc:
+            adapter._generate(page, request(), _FLOW_PROJECT_URL, 12)
+    assert exc.value.code == 'GOOGLE_FLOW_VIDEO_ACCEPTANCE_UNKNOWN'
+    assert exc.value.provider_operation_id == _FLOW_PROJECT_URL
+    assert page.evaluate('window.sendCount') == 1
+
+
+def test_generate_observes_delayed_video_after_project_refresh(page, adapter):
+    _generate_page(page)
+    observations = []
+
+    def serve_project(route):
+        observations.append(route.request.url)
+        route.fulfill(
+            content_type='text/html',
+            body=_VIDEO_PENDING if len(observations) > 1 else '<flow-image-tile>Reference</flow-image-tile>',
+        )
+
+    page.context.route(_FLOW_PROJECT_URL, serve_project)
+    with patch.object(adapter, '_assert_start_frame'), \
+         patch.object(adapter, '_credit_balance_on_page', return_value=100):
+        result = adapter._generate(page, request(), _FLOW_PROJECT_URL, 12)
+    assert result.status == 'submitted'
+    assert len(observations) == 2
+    assert page.evaluate('window.sendCount') == 1
+
+
+def test_generate_reports_explicit_flow_rejection_in_http_200(page, adapter):
+    page.route(_FLOW_PROJECT_URL, lambda route: route.fulfill(content_type='text/html', body='<html></html>'))
+    page.goto(_FLOW_PROJECT_URL)
+    page.route('**/batchexecute', lambda route: route.fulfill(
+        status=200, content_type='text/plain', body='["PUBLIC_ERROR_UNUSUAL_ACTIVITY"]',
+    ))
+    _generate_page(page, on_send="fetch('/batchexecute',{method:'POST'})", persisted_video=False)
+    with patch.object(adapter, '_assert_start_frame'), \
+         patch.object(adapter, '_credit_balance_on_page', return_value=100):
+        result = adapter._generate(page, request(), _FLOW_PROJECT_URL, 12)
+    assert result.status == 'failed'
+    assert result.error_code == 'PUBLIC_ERROR_UNUSUAL_ACTIVITY'
+    assert result.provider_operation_id == _FLOW_PROJECT_URL
+    assert page.evaluate('window.sendCount') == 1
+
+
+@pytest.mark.parametrize("optimistic_tile", [True, False])
+def test_generate_keeps_confirmed_video_if_flow_also_reports_activity_marker(page, adapter, optimistic_tile):
+    page.route(_FLOW_PROJECT_URL, lambda route: route.fulfill(content_type='text/html', body='<html></html>'))
+    page.goto(_FLOW_PROJECT_URL)
+    page.route('**/batchexecute', lambda route: route.fulfill(
+        status=200, content_type='text/plain', body='["PUBLIC_ERROR_UNUSUAL_ACTIVITY"]',
+    ))
+    pending = ("document.body.insertAdjacentHTML('beforeend',"
+               "'<flow-pending-tile><mat-icon>movie</mat-icon></flow-pending-tile>');") if optimistic_tile else ""
+    _generate_page(page, on_send=pending + "fetch('/batchexecute',{method:'POST'})")
+    with patch.object(adapter, '_assert_start_frame'), \
+         patch.object(adapter, '_credit_balance_on_page', return_value=100):
+        result = adapter._generate(page, request(), _FLOW_PROJECT_URL, 12)
+    assert result.status == 'submitted'
+    assert result.provider_operation_id == _FLOW_PROJECT_URL
+    assert page.evaluate('window.sendCount') == 1
+
+
+def test_generate_ignores_activity_marker_from_request_started_before_send(page, adapter):
+    page.route(_FLOW_PROJECT_URL, lambda route: route.fulfill(content_type='text/html', body='<html></html>'))
+    page.goto(_FLOW_PROJECT_URL)
+    earlier = []
+    page.route('**/batchexecute', lambda route: earlier.append(route))
+
+    def complete_after_send(route):
+        earlier[0].fulfill(status=200, body='["PUBLIC_ERROR_UNUSUAL_ACTIVITY"]')
+        route.fulfill(status=200)
+
+    page.route('**/sent', complete_after_send)
+    _generate_page(page, on_send="fetch('/sent')", persisted_video=False)
+    with page.expect_request('**/batchexecute'):
+        page.evaluate("() => { void fetch('/batchexecute', {method:'POST'}); }")
+    with patch.object(adapter, '_assert_start_frame'), \
+         patch.object(adapter, '_credit_balance_on_page', return_value=100):
+        with pytest.raises(RuntimeError) as exc:
+            adapter._generate(page, request(), _FLOW_PROJECT_URL, 12)
+    assert exc.value.code == 'GOOGLE_FLOW_VIDEO_ACCEPTANCE_UNKNOWN'
     assert page.evaluate('window.sendCount') == 1
 
 
@@ -237,3 +335,47 @@ def test_image_references_select_exact_content_instead_of_first_asset(page, tmp_
     provider._attach_image_references(page,[source])
     assert page.locator('.chip-container').count() == 1
     assert page.evaluate('window.wrongAsset === undefined')
+
+
+def test_reference_picker_waits_for_exact_title_to_finish_uploading(page, tmp_path):
+    import hashlib
+    from video_factory.integrations.flow_ui_recipe import attach_reference_asset
+
+    source = tmp_path / 'product.webp'
+    source.write_bytes(b'product reference')
+    filename = 'flow-ref-' + hashlib.sha256(source.read_bytes()).hexdigest() + '.webp'
+    page.set_content(f'''
+        <button class="sidebar-upload-btn" onclick="window.uploadedAgain=true">Upload</button>
+        <button class="asset-item" onclick="window.wrongAsset=true">
+            <span class="asset-title">other-{filename}</span>
+        </button>
+        <button class="asset-item" onclick="window.pickedWhileUploading=!!document.querySelector('#progress')">
+            <span id="progress">Đang tải lên</span><mat-icon>image</mat-icon>
+            <span class="asset-title">{filename}</span><span class="type-subtitle">Hình ảnh</span>
+        </button>
+        <script>setTimeout(() => document.querySelector('#progress').remove(), 200)</script>
+    ''')
+    attach_reference_asset(page, source, tmp_path / 'uploads', 1000)
+    assert page.evaluate('window.pickedWhileUploading === false')
+    assert page.evaluate('window.wrongAsset === undefined && window.uploadedAgain === undefined')
+
+
+def test_reference_picker_rejects_duplicate_exact_titles(page, tmp_path):
+    import hashlib
+    from video_factory.integrations.flow_ui_recipe import attach_reference_asset
+
+    source = tmp_path / 'product.webp'
+    source.write_bytes(b'product reference')
+    filename = 'flow-ref-' + hashlib.sha256(source.read_bytes()).hexdigest() + '.webp'
+    page.set_content(f'''
+        <button class="sidebar-upload-btn" onclick="window.clicked=true">Upload</button>
+        <button class="asset-item" onclick="window.clicked=true">
+            <mat-icon>image</mat-icon><span class="asset-title">{filename}</span>
+        </button>
+        <button class="asset-item" onclick="window.clicked=true">
+            <mat-icon>image</mat-icon><span class="asset-title">{filename}</span>
+        </button>
+    ''')
+    with pytest.raises(RuntimeError, match='GOOGLE_FLOW_REFERENCE_ASSET_NOT_UNIQUE.*matches=2'):
+        attach_reference_asset(page, source, tmp_path / 'uploads', 1000)
+    assert page.evaluate('window.clicked === undefined')

@@ -40,18 +40,23 @@ def workflow_has_inflight_operation(connection: sqlite3.Connection, workflow_id:
     """Return True if workflow_id has an active in-flight operation currently holding or polling provider capacity."""
     if not workflow_id:
         return False
-    for table in ("video_factory_keyframe_operation", "video_factory_scene_operation"):
-        exists = connection.execute(
-            "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)
-        ).fetchone()
-        if exists:
-            row = connection.execute(
-                f"SELECT 1 FROM {table} WHERE workflow_id=? AND status IN ('submitted', 'running') LIMIT 1",
-                (workflow_id,),
-            ).fetchone()
-            if row:
-                return True
-    return False
+    tables = {row[0] for row in connection.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name IN "
+        "('video_factory_keyframe_operation','video_factory_scene_operation','video_factory_render_batches')"
+    )}
+    if "video_factory_keyframe_operation" in tables and connection.execute(
+        "SELECT 1 FROM video_factory_keyframe_operation "
+        "WHERE workflow_id=? AND status IN ('submitted','running') LIMIT 1",
+        (workflow_id,),
+    ).fetchone():
+        return True
+    return {"video_factory_scene_operation", "video_factory_render_batches"} <= tables and bool(connection.execute(
+        "SELECT 1 FROM video_factory_scene_operation AS scene "
+        "JOIN video_factory_render_batches AS batch ON batch.render_batch_id=scene.render_batch_id "
+        "AND batch.owner_user_id=scene.owner_user_id AND batch.project_id=scene.project_id "
+        "WHERE batch.workflow_id=? AND scene.status IN ('submitted','running') LIMIT 1",
+        (workflow_id,),
+    ).fetchone())
 
 
 _SCHEMA = """

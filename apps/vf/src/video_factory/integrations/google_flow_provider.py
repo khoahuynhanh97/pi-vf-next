@@ -329,6 +329,10 @@ class GoogleFlowBrowserPage:
             )
 
     def submit(self, request: VideoGenerationRequest) -> VideoGenerationResult:
+        import random
+        import time
+        delay = random.uniform(8, 15)
+        time.sleep(delay)
         if request.duration_seconds not in {4, 6, 8, 10}:
             return VideoGenerationResult(
                 request_id=request.request_id, status="failed", error_code="FLOW_DURATION_UNSUPPORTED",
@@ -468,29 +472,94 @@ class GoogleFlowBrowserPage:
         page.locator(".cdk-overlay-backdrop:visible").wait_for(state="hidden", timeout=5000)
 
         # This is the only paid action. Timeout after this point is ambiguous.
-        video_tiles = page.locator("flow-video-tile:visible")
-        baseline_video = video_tiles.count()
-        baseline_pending_video = sum(
-            icon.strip().lower() in FLOW_VIDEO_PENDING_ICONS
-            for icon in page.locator("flow-pending-tile:visible mat-icon").all_text_contents()
-        )
-        submit.click(timeout=3000)
+        def video_counts(current_page: Any) -> tuple[int, int]:
+            return (
+                current_page.locator("flow-video-tile:visible").count(),
+                sum(icon.strip().lower() in FLOW_VIDEO_PENDING_ICONS for icon in
+                    current_page.locator("flow-pending-tile:visible mat-icon").all_text_contents()),
+            )
+
+        baseline_video, baseline_pending_video = video_counts(page)
+        rejection = None
+        send_requests = set()
+
+        def observe_request(outgoing: Any) -> None:
+            target = urlparse(outgoing.url)
+            if (target.hostname == "flow.google.com" and target.path.endswith("/batchexecute")
+                    and outgoing.method == "POST"):
+                send_requests.add(outgoing)
+
+        def observe_rejection(response: Any) -> None:
+            nonlocal rejection
+            if response.request not in send_requests:
+                return
+            try:
+                rejected = re.search(r"\bPUBLIC_ERROR_UNUSUAL_ACTIVITY\b", response.text())
+            except Exception:
+                return  # A missing response body is not proof of rejection.
+            if rejected:
+                rejection = VideoGenerationResult(
+                    request_id=request.request_id, status="failed", provider_operation_id=project_url,
+                    error_code="PUBLIC_ERROR_UNUSUAL_ACTIVITY",
+                    error_message="Google Flow rejected the video request as unusual activity",
+                    metadata={"provider_kind": "google_flow"},
+                )
+
+        page.on("request", observe_request)
+        page.on("response", observe_rejection)
         try:
+            submit.click(timeout=3000)
+            saw_send_tile = False
             deadline = time.monotonic() + min(20.0, self.timeout_ms / 1000)
             while time.monotonic() < deadline:
-                pending_icons = page.locator("flow-pending-tile:visible mat-icon").all_text_contents()
-                pending_video = sum(icon.strip().lower() in FLOW_VIDEO_PENDING_ICONS for icon in pending_icons)
-                if video_tiles.count() > baseline_video or pending_video > baseline_pending_video:
+                videos, pending = video_counts(page)
+                saw_send_tile = videos > baseline_video or pending > baseline_pending_video
+                if saw_send_tile or rejection:
                     break
                 page.wait_for_timeout(250)
             else:
-                err = TerminalJobError(
-                    "Flow paid Send has no confirmed video tile; reconcile the existing project before retrying",
-                    code="GOOGLE_FLOW_VIDEO_ACCEPTANCE_UNKNOWN",
-                )
-                err.provider_operation_id = project_url
-                raise err
-            page.wait_for_timeout(3000)
+                if not rejection:
+                    err = TerminalJobError(
+                        "Flow paid Send has no confirmed video tile; reconcile the existing project before retrying",
+                        code="GOOGLE_FLOW_VIDEO_ACCEPTANCE_UNKNOWN",
+                    )
+                    err.provider_operation_id = project_url
+                    raise err
+            if saw_send_tile:
+                page.wait_for_timeout(3000)
+            # A pending tile in the submitting tab can be optimistic. Read
+            # the same project in a fresh tab while keeping the sender open.
+            observation = page.context.new_page()
+            try:
+                observation.goto(project_url, wait_until="domcontentloaded", timeout=min(self.timeout_ms, 15000))
+                observation_seconds = min(45.0, self.timeout_ms / 1000)
+                refresh_interval = min(5.0, observation_seconds / 4)
+                deadline = time.monotonic() + observation_seconds
+                refresh_at = time.monotonic() + refresh_interval
+                while observation.url.rstrip("/") == project_url.rstrip("/") and time.monotonic() < deadline:
+                    videos, pending = video_counts(observation)
+                    if videos > baseline_video or pending > baseline_pending_video:
+                        break
+                    if rejection and not saw_send_tile:
+                        return rejection
+                    # A tab opened before Flow persisted the job can show a
+                    # stale project snapshot. Refresh the observer, not Send.
+                    remaining_ms = int((deadline - time.monotonic()) * 1000)
+                    if time.monotonic() >= refresh_at and remaining_ms > 0:
+                        observation.reload(wait_until="domcontentloaded", timeout=min(remaining_ms, 10000))
+                        refresh_at = time.monotonic() + refresh_interval
+                    observation.wait_for_timeout(250)
+                else:
+                    if rejection and observation.url.rstrip("/") == project_url.rstrip("/"):
+                        return rejection
+                    err = TerminalJobError(
+                        "Flow video tile was not confirmed after reopening the project; reconcile before retrying",
+                        code="GOOGLE_FLOW_VIDEO_ACCEPTANCE_UNKNOWN",
+                    )
+                    err.provider_operation_id = project_url
+                    raise err
+            finally:
+                observation.close()
         except TerminalJobError:
             raise
         except Exception as exc:
@@ -500,6 +569,9 @@ class GoogleFlowBrowserPage:
             )
             err.provider_operation_id = project_url
             raise err from exc
+        finally:
+            page.remove_listener("response", observe_rejection)
+            page.remove_listener("request", observe_request)
         return VideoGenerationResult(
             request_id=request.request_id, status="submitted",
             provider_operation_id=project_url,
