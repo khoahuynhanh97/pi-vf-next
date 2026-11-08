@@ -311,12 +311,14 @@ def export_run(run_dir: Path) -> dict:
 
 
 def publish(run_dir: Path, inbox_root: Path, batch_id: str | None = None,
-            eligible_only: bool = False) -> Path:
+            eligible_only: bool = False, *, row_id: str | None = None) -> Path:
     run_dir = run_dir.resolve()
     if (run_dir / "intake.json").is_file():
         intake = read_json(run_dir / "intake.json")
         if intake.get("mode") == "pi_selection":
-            return _publish_root_intake(run_dir, inbox_root, batch_id, eligible_only)
+            return _publish_root_intake(run_dir, inbox_root, batch_id, eligible_only, row_id=row_id)
+    if row_id is not None:
+        raise ValueError("row_id is only supported in pi_selection mode.")
     # Reuse only the legacy key functions; do not change or execute its runner.
     from scripts.publish_exchange import compute_canonical_product_key, compute_product_key
 
@@ -387,7 +389,7 @@ def publish(run_dir: Path, inbox_root: Path, batch_id: str | None = None,
 
 
 def _publish_root_intake(run_dir: Path, inbox_root: Path, batch_id: str | None,
-                         eligible_only: bool) -> Path:
+                         eligible_only: bool, *, row_id: str | None = None) -> Path:
     """Aggregate reviewed child captures into one immutable Exchange run batch."""
     from scripts.publish_exchange import compute_canonical_product_key, compute_product_key
 
@@ -417,19 +419,42 @@ def _publish_root_intake(run_dir: Path, inbox_root: Path, batch_id: str | None,
                                      "selection_reason","video_concept","script_draft","claims_to_verify",
                                      "source_refs_json","observed_at"))):
             raise ValueError("Root intake row binding differs from its selected CSV.")
-    expected_batch = f"run_{state['batch_id']}"
-    effective = batch_id or expected_batch
-    if effective != expected_batch:
-        raise ValueError("Root intake batch_id is bound; publication prefix must be run_<selection_batch_id>.")
     rows = state.get("rows", [])
     if not rows:
         raise ValueError("Root intake has no selected rows.")
+
+    if not state.get("batch_id") or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,100}", str(state["batch_id"])):
+        raise ValueError("Invalid source selection batch_id.")
+
+    if row_id is not None:
+        if not isinstance(row_id, str) or not re.fullmatch(r"row_\d{4,}", row_id):
+            raise ValueError(f"Invalid row_id format: {row_id}")
+        target_row = next((r for r in rows if r.get("row_id") == row_id), None)
+        if target_row is None:
+            raise ValueError(f"Unrecognized row_id: {row_id}")
+        if target_row.get("status") != "completed":
+            raise ValueError(f"Row {row_id} is not completed (status={target_row.get('status')}).")
+        expected_batch = f"run_{state['batch_id']}_{row_id}"
+        prefix_msg = "run_<selection_batch_id>_<row_id>"
+        candidate_rows = [target_row]
+        publication_state = target_row
+    else:
+        expected_batch = f"run_{state['batch_id']}"
+        prefix_msg = "run_<selection_batch_id>"
+        candidate_rows = rows
+        publication_state = state
+
+    effective = batch_id or expected_batch
+    if effective != expected_batch:
+        raise ValueError(f"Root intake batch_id is bound; publication prefix must be {prefix_msg}.")
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,100}", effective):
+        raise ValueError("Invalid batch_id.")
 
     eligible: list[tuple[dict, dict, dict, Path, dict]] = []
     outcomes = []
     seen: set[str] = set()
     bindings = []
-    for row in rows:
+    for row in candidate_rows:
         outcome = {"row_id": row["row_id"], "candidate_id": row.get("candidate_id"),
                    "input_status": row.get("status"), "status": "needs_review",
                    "reason": row.get("reason") or "Row is not eligible for Exchange publication."}
@@ -464,19 +489,20 @@ def _publish_root_intake(run_dir: Path, inbox_root: Path, batch_id: str | None,
 
     if not eligible:
         raise ValueError("No eligible reviewed products; no Exchange READY batch was created.")
-    if len(eligible) != len(rows) and not eligible_only:
+    if len(eligible) != len(candidate_rows) and not eligible_only:
         raise ValueError("Root intake has blocked rows; explicitly use --eligible-only for a partial publication.")
     binding = {"selection_csv_sha256": state["selection_csv_sha256"], "rows": bindings,
                "eligible_candidate_ids": [item[0].get("candidate_id") for item in eligible],
-               "outcomes_sha256": __import__("hashlib").sha256(json.dumps(outcomes, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()).hexdigest()}
+               "outcomes_sha256": hashlib.sha256(json.dumps(outcomes, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()).hexdigest()}
     binding_sha = hashlib.sha256(json.dumps(binding, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
-    intent = state.get("publish_intent")
+
+    intent = publication_state.get("publish_intent")
     if intent and (intent.get("binding_sha256") != binding_sha or intent.get("eligible_only") != eligible_only):
         raise ValueError("Root publication inputs changed after intent was pinned; do not overwrite the batch.")
     if not intent:
         intent = {"batch_id": effective, "created_at": now(), "eligible_only": eligible_only,
                   "binding": binding, "binding_sha256": binding_sha}
-        state["publish_intent"] = intent
+        publication_state["publish_intent"] = intent
         atomic_json(run_dir / "intake.json", state)
     elif batch_id and batch_id != intent["batch_id"]:
         raise ValueError("Publication batch ID differs from the pinned intent.")
@@ -496,7 +522,7 @@ def _publish_root_intake(run_dir: Path, inbox_root: Path, batch_id: str | None,
         outcomes_path = final / "outcomes.json"
         if not outcomes_path.is_file() or digest(outcomes_path) != manifest.get("outcomes_sha256"):
             raise ValueError("Existing Exchange outcomes changed; immutable publication conflict.")
-        receipt = state.get("publication_receipt")
+        receipt = publication_state.get("publication_receipt")
         if receipt and receipt.get("manifest_sha256") != digest(manifest_path):
             raise ValueError("Published Exchange manifest changed after receipt; immutable publication conflict.")
         for product in manifest.get("products", []):
@@ -506,7 +532,7 @@ def _publish_root_intake(run_dir: Path, inbox_root: Path, batch_id: str | None,
                     raise ValueError("Existing Exchange image revision changed; immutable publication conflict.")
         if not (final / "READY").is_file():
             (final / "READY").write_text(f"READY {intent['created_at']}\n", encoding="utf-8")
-        state["publication_receipt"] = {"path": str(final), "manifest_sha256": digest(manifest_path), "binding_sha256": binding_sha}
+        publication_state["publication_receipt"] = {"path": str(final), "manifest_sha256": digest(manifest_path), "binding_sha256": binding_sha}
         atomic_json(run_dir / "intake.json", state)
         return final
 
@@ -552,11 +578,11 @@ def _publish_root_intake(run_dir: Path, inbox_root: Path, batch_id: str | None,
         "selection_csv_sha256":state["selection_csv_sha256"], "source_binding_sha256":binding_sha,
         "outcomes_sha256":digest(outcomes_path),
         "eligible_only":eligible_only,"products":out_products,
-        "excluded_item_ids":[r["row_id"] for r in rows if r["row_id"] not in {x[0]["row_id"] for x in eligible}]})
+        "excluded_item_ids":[r["row_id"] for r in candidate_rows if r["row_id"] not in {x[0]["row_id"] for x in eligible}]})
     staged_sha = digest(manifest_path)
     staging.rename(final)
     (final / "READY").write_text(f"READY {intent['created_at']}\n", encoding="utf-8")
-    state["publication_receipt"] = {"path":str(final),"manifest_sha256":staged_sha,"binding_sha256":binding_sha}
+    publication_state["publication_receipt"] = {"path":str(final),"manifest_sha256":staged_sha,"binding_sha256":binding_sha}
     atomic_json(run_dir / "intake.json", state)
     return final
 

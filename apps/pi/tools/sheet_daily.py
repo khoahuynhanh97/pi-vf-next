@@ -78,13 +78,25 @@ def run_daily(*, root: Path, day: str, db_path: Path, fetch=fetch_public_xlsx,
         reasons = acquire_batch(run)
         acquisition_reason = "; ".join(reasons) if reasons else None
         state = read_json(run / "intake.json")
+    
     pending = [row["name"] for row in state["rows"] if row["status"] not in ("completed", "skipped")]
     if pending or not any(row["status"] == "completed" for row in state["rows"]):
         output.update(status="waiting", pending_items=pending,
                       reason=acquisition_reason or "Đang chờ PI thu thập và duyệt ảnh sản phẩm từ hai Google Sheets.",
                       next_step=f"Tiếp tục Spaiauto intake tại {run}, rồi chạy lại cùng ngày.")
         return output
-    output.update(status="success", exchange_batch_dir=str(publish(run, inbox_root, eligible_only=True)))
+    
+    published_batches = []
+    for row in state["rows"]:
+        if row["status"] == "completed":
+            row_id = row["row_id"]
+            try:
+                batch_path = publish(run, inbox_root, eligible_only=True, row_id=row_id)
+                published_batches.append({"row_id": row_id, "batch_path": str(batch_path), "name": row["name"]})
+            except Exception as exc:
+                published_batches.append({"row_id": row_id, "error": str(exc), "name": row["name"]})
+    
+    output.update(status="success", exchange_batches=published_batches)
     return output
 
 

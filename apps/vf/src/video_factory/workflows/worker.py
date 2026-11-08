@@ -50,12 +50,7 @@ def _should_pause_worker(
     pause_code = str(pause.get("code") or "")
     paused_wf = str(pause.get("workflow_id") or "")
     if pause_code == "PROVIDER_CAPACITY_WAIT":
-        scope = workflow_ids
-        if scope is None and connection is not None:
-            scope = [str(row[0]) for row in connection.execute("SELECT workflow_id FROM workflow")]
-        if connection is not None and any(workflow_has_inflight_operation(connection, wf) for wf in (scope or [])):
-            return False
-        return True
+        return False
     is_shared = is_shared_infra_blocker(pause_code)
     return is_shared or not paused_wf
 
@@ -224,9 +219,9 @@ def run_worker(
                 return DispatchReport(claimed=0, succeeded=0, failed=0, quarantined=0)
             dispatch_ids = _pause_dispatch_scope(connection, workflow_ids, workflow_id_prefix, current_pause)
             if current_pause and current_pause.get("code") == "PROVIDER_CAPACITY_WAIT":
-                dispatch_ids = _capacity_dispatch_scope(connection, workflow_ids, workflow_id_prefix)
-                if not dispatch_ids:
-                    return DispatchReport(claimed=0, succeeded=0, failed=0, quarantined=0)
+                inflight_ids = _capacity_dispatch_scope(connection, workflow_ids, workflow_id_prefix)
+                if inflight_ids:
+                    dispatch_ids = inflight_ids
             dispatcher.reclaim_expired()
             report = dispatcher.process_batch(
                 # Keep auto progression serial: do not lease jobs whose QC
@@ -245,10 +240,9 @@ def run_worker(
                     continue
                 dispatch_ids = _pause_dispatch_scope(connection, workflow_ids, workflow_id_prefix, current_pause)
                 if current_pause and current_pause.get("code") == "PROVIDER_CAPACITY_WAIT":
-                    dispatch_ids = _capacity_dispatch_scope(connection, workflow_ids, workflow_id_prefix)
-                    if not dispatch_ids:
-                        stop_event.wait(poll_interval)
-                        continue
+                    inflight_ids = _capacity_dispatch_scope(connection, workflow_ids, workflow_id_prefix)
+                    if inflight_ids:
+                        dispatch_ids = inflight_ids
                 dispatcher.reclaim_expired()
                 dispatcher.process_batch(batch_size=1,
                     workflow_id_prefix=None if dispatch_ids is not None else workflow_id_prefix,
