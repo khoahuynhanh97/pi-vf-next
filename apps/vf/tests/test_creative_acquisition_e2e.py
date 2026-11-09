@@ -131,6 +131,7 @@ def test_fake_pi_through_real_durable_worker_to_silent_export_and_skip(tmp_path,
     })
     model=FakeRoles(fail_stage=fail_stage)
     api=FakeVideoAPI(tmp_path,conn,model)
+    api.checkpoint_render_batch = fail_stage == 'assembly'
     model.on_failure=lambda:(api.images,api.videos)
     class Images:
         provider_kind='google_flow'
@@ -140,11 +141,14 @@ def test_fake_pi_through_real_durable_worker_to_silent_export_and_skip(tmp_path,
             Image.new('RGB',(90,160),'gray').save(path)
             return KeyframeGenerationResult(request.operation_id,'completed',request.operation_id,str(path))
     runtime=KeyframeRuntime(store=KeyframeOperationStore(conn),provider=Images())
+    director_config_version=coordinator.workflow_repo.get_workflow(workflow_id)[0]['creative_policy'].get('director_config_version')
     generator=AgenticCreativeGenerator(model,profile=BackendProfile.from_dict(cfg['profile']),
-        category=cfg['category'],visible_details=cfg['visible_details'])
+        category=cfg['category'],visible_details=cfg['visible_details'],
+        director_config_version=director_config_version)
     service=ProductVideoJobHandlers(pi_client=pi,video_client=api,creative_generator=generator,
         workflow_engine=WorkflowEngine(coordinator.workflow_repo),workflow_repository=coordinator.workflow_repo,
         keyframe_runtime_factory=lambda:runtime,provider_mode='fake')
+    monkeypatch.setattr(service,'_bind_creative_run',lambda ctx:None)
     resource_pack_job=service.resource_pack_job
     def with_offline_image_qc(ctx,research,**kwargs):
         result=resource_pack_job(ctx,research,**kwargs)
@@ -181,6 +185,15 @@ def test_fake_pi_through_real_durable_worker_to_silent_export_and_skip(tmp_path,
     monkeypatch.setattr('video_factory.automation.coordinator.run_worker',worker)
     states=[]
     for _ in range(25):
+        current = coordinator.workflow_repo.get_workflow(workflow_id)[0]
+        if ((fail_stage is None and current["state"] == "AwaitingFinalApproval")
+                or (fail_stage == "assembly" and current["state"] == "rendering" and model.failed_once)):
+            from video_factory.automation.failure_classification import FailureCategory
+            from video_factory.workflows.runtime_control import pause_pipeline
+
+            pause_pipeline(conn, category=FailureCategory.QC_INFRA_PAUSED,
+                           code="RESOURCE_EXHAUSTED", message="Product B exhausted provider quota",
+                           workflow_id="wf-quota-B")
         step=coordinator.advance_creative(workflow_id,provider_mode='fake')
         states.append(step['state'])
         if step['state']=='completed':break

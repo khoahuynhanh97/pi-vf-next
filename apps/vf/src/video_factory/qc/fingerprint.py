@@ -38,6 +38,7 @@ def qc_fingerprint(
     reference_digests: list[str] | None = None,
     attempt_id: str = "",
     scene_provider_kinds: list[str] | None = None,
+    keyframe_essential_only: bool = False,
 ) -> str:
     payload: dict[str, Any] = {
         "workflow_id": workflow_id,
@@ -79,6 +80,8 @@ def qc_fingerprint(
             key: product.source_context.get(key, "")
             for key in ("identity_mode", "canonical_product_key", "source_snapshot_digest")
         }
+    if stage == QCStage.KEYFRAME and keyframe_essential_only:
+        payload["keyframe_policy"] = "essential-only-v1"
     if stage == QCStage.VIDEO:
         payload["storyboard"] = storyboard or {}
         payload["video_sha256"] = video_sha256

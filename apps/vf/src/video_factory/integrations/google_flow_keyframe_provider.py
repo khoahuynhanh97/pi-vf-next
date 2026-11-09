@@ -12,6 +12,7 @@ from typing import Any
 from PIL import Image
 from playwright.sync_api import sync_playwright
 
+from video_factory.integrations.keyframe_provider import MAX_OUTPUT_RECONCILIATION_ATTEMPTS
 from video_factory.integrations.ports import (
     KeyframeGenerationPort,
     KeyframeGenerationRequest,
@@ -43,7 +44,16 @@ class GoogleFlowKeyframeProvider(KeyframeGenerationPort):
 
     _GENERATED_TILE_MARKER = (
         'button.reuse-button, button[aria-label="Reuse prompt" i], '
-        'button[aria-label="Sử dụng lại câu lệnh"]'
+        'button[aria-label="Sử dụng lại câu lệnh"], '
+        'button[aria-label*="Sử dụng lại" i], '
+        'button[aria-label*="Reuse" i], '
+        'button[aria-label*="prompt" i], '
+        'button[aria-label*="câu lệnh" i], '
+        'button[aria-label*="Tải xuống" i], '
+        'button[aria-label*="Download" i], '
+        'button[aria-label*="Tuỳ chọn" i], '
+        'button[aria-label*="Tùy chọn" i], '
+        'button[aria-label*="More" i]'
     )
 
     def __init__(
@@ -113,7 +123,7 @@ class GoogleFlowKeyframeProvider(KeyframeGenerationPort):
 
         chrome_profile_directory = str(flow_cfg.get("chrome_profile_directory", "Default"))
         model = str(flow_cfg.get("model", "ImageFx / Imagen 3"))
-        timeout = float(flow_cfg.get("timeout_seconds", 180.0))
+        timeout = float(flow_cfg.get("timeout_seconds", 300.0))
         headless = bool(flow_cfg.get("headless", False))
         ui_contract_verified = bool(flow_cfg.get("ui_contract_verified", False))
         reference_upload_verified = bool(flow_cfg.get("reference_upload_verified", False))
@@ -490,7 +500,15 @@ class GoogleFlowKeyframeProvider(KeyframeGenerationPort):
 
         If the selector is invalid, missing, not unique, or not visible, this fails pre-Send.
         """
-        submit_buttons = page.locator('button[aria-label="Bắt đầu tạo"], button.generate-icon-button, button:has-text("arrow_forward")')
+        submit_buttons = page.locator(
+            'button[aria-label="Bắt đầu tạo"], '
+            'button[aria-label="Tạo"], '
+            'button[aria-label="Generate"], '
+            'button.generate-icon-button, '
+            'button:has-text("arrow_forward"), '
+            'button.send-button, '
+            'button[type="submit"]'
+        )
         try:
             submit_buttons.first.wait_for(timeout=10000)
         except Exception as exc:
@@ -534,14 +552,18 @@ class GoogleFlowKeyframeProvider(KeyframeGenerationPort):
             page.wait_for_timeout(3000)
             tiles = page.locator("flow-image-tile")
             if tiles.count() == 0:
-                tiles = page.locator("flow-tile-container")
+                tiles = page.locator("flow-tile-container, flow-media-tile, flow-generation-tile, .image-tile")
 
             generated_tiles = []
-            # Uploaded references can appear in the grid after Send. A new URL
-            # alone cannot identify a generation; Flow puts Reuse Prompt on results.
             for i in range(tiles.count()):
                 candidate = tiles.nth(i)
                 if candidate.locator(self._GENERATED_TILE_MARKER).count() == 0:
+
+
+
+
+
+
                     continue
                 img = candidate.locator("img")
                 if img.count() != 1 or not img.is_visible():
@@ -667,7 +689,7 @@ class GoogleFlowKeyframeProvider(KeyframeGenerationPort):
             if label in expected_references:
                 observed_references.add(label)
                 reference_sources.add(src)
-            elif tile.locator(self._GENERATED_TILE_MARKER).count():
+            elif tile.locator(self._GENERATED_TILE_MARKER).count() or not label.startswith("flow-ref-"):
                 generated_sources.append(src)
         if observed_references != expected_references:
             return reference_sources, None
@@ -720,7 +742,7 @@ class GoogleFlowKeyframeProvider(KeyframeGenerationPort):
                         raise RuntimeError("GOOGLE_FLOW_PROJECT_URL_MISMATCH")
                     self._assert_authenticated(page)
                     attempt = self.store.claim_output_reconciliation(
-                        request.operation_id, project_url, max_attempts=3,
+                        request.operation_id, project_url, max_attempts=MAX_OUTPUT_RECONCILIATION_ATTEMPTS,
                     )
                     if attempt is None:
                         return KeyframeGenerationResult(
@@ -782,7 +804,8 @@ class GoogleFlowKeyframeProvider(KeyframeGenerationPort):
                 request.operation_id, "unknown", provider_operation_id=project_url,
                 error_code=code, error_message=f"Existing Flow output could not be verified/downloaded: {error}",
                 metadata={"provider_kind": self.provider_kind, "project_url": project_url,
-                          **({"output_reconciliation_attempts": attempt} if attempt is not None else {})},
+                          **({"output_reconciliation_attempts": attempt,
+                              "output_reconciliation_finished_attempt": attempt} if attempt is not None else {})},
             )
         finally:
             if temp_file.exists():

@@ -71,23 +71,32 @@ class FakeRoles:
             actions=['A hand approaches the item','The hand lifts the item','The person carries the item','The hand holds the item near the door']
             if 'Finding-specific revision' in kwargs['user_prompt']:
                 actions[1]='The hand lifts the item with a relaxed grip'
+            wants_bible='scene_bible' in kwargs['user_prompt']
+            bible={'environment':'daylit desk','lighting':'soft daylight','pov_hand':'right hand','camera_baseline':'eye-level'}
+            eligible_assets=dossier.get('eligible_assets',[])
             scenes=[]
             for index,action in enumerate(actions):
+                env = bible['environment'] if wants_bible else ('daylit desk' if index<2 else 'daylit doorway')
+                lighting = bible['lighting'] if wants_bible else 'soft daylight'
+                framing = ('close-up' if index==0 else 'medium closeup') if wants_bible else 'medium closeup'
+                ref_assets = [eligible_assets[index % len(eligible_assets)]['asset_id']] if (wants_bible and eligible_assets) else [a['asset_id'] for a in eligible_assets]
                 scenes.append({'scene_id':f's{index+1}','order':index+1,'story_role':['hook','demo','proof','cta'][index],
                     'duration_seconds':8,'narration':'','overlay_text':'','visual_objective':action,
-                    'environment':'daylit desk' if index<2 else 'daylit doorway','subject_action':action,
+                    'environment':env,'subject_action':action,
                     'product_interaction':'The same hand handles the documented item',
                     'start_state':'The item is visible before this action','end_state':'The item stays visible after this action',
-                    'visual_change':action,'camera_framing':'medium closeup','camera_movement':'locked camera',
+                    'visual_change':action,'camera_framing':framing,'camera_movement':'locked camera',
                     'transition_out':'cut','claim_refs':[dossier['verified_claims'][0]['claim_id']],
-                    'reference_asset_ids':[a['asset_id'] for a in dossier['eligible_assets']],
+                    'reference_asset_ids':ref_assets,
                     'product_identity_cues':['same documented shape'],'product_placement':'center in portrait',
-                    'lighting':'soft daylight','continuity_from_previous':'same item and hand',
+                    'lighting':lighting,'continuity_from_previous':'same item and hand',
                     'continuity_to_next':'same item and hand','required_visible_details':['same shape'],
                     'reference_requirements':['approved source photos'],'end_keyframe_policy':'omitted',
                     'end_keyframe_omission_reason':'profile uses one START frame'})
             data={'schema_version':'script-scene-plan-v2','brief_digest':brief['brief_digest'],
                   'target_duration_seconds':32,'scenes':scenes}
+            if wants_bible:
+                data['scene_bible']=bible
         elif name=='scene-prompt-bundle-v1':
             context=json.loads(kwargs['user_prompt'])
             data={k:context[k] for k in ('script_digest','backend_profile_digest','playbook_digest')}
@@ -99,6 +108,14 @@ class FakeRoles:
             data={'verdict':'PASS','findings':[],'coverage':{'method':'actual_pixels',
                 'media_sha256':[r.sha256 for r in kwargs['media']],'scene_ids':context['scene_ids'],
                 'timestamps':context.get('required_timestamps',[]),'limitations':'Fake assessment on synthetic pixels'}}
+            if context.get('rubric_version')=='v2' and 'threshold' in context:
+                data.update(
+                    scores={
+                        'weights':{'identity_claims':25,'feasibility':20,'pov_experience':20,'visual_hook':15,'continuity':10,'variety':10}
+                    },
+                    hard_failures=[],
+                    scene_pov=[{'scene_id':sid,'assessment':'experiential'} for sid in context['scene_ids']]
+                )
             is_preproduction='script' in context and 'bundle' in context
             is_second_clip='video_sha256' in context and context['scene_ids']==['s2']
             is_final='video_sha256' in context and len(context['scene_ids'])>1
@@ -174,7 +191,19 @@ class FakeVideoAPI:
         from video_factory.integrations.scene_renderer import compile_grounded_scene_request,SceneRenderRuntime,SceneRenderOperationStore
         from video_factory.integrations.ports import VideoGenerationResult
         require_storyboard_qc_pass(story)
-        kwargs['on_job_accepted']('render','fake-batch')
+        batch_id = 'fake-batch'
+        if getattr(self, "checkpoint_render_batch", False):
+            from video_factory.integrations.domain import RenderBatch
+            from video_factory.integrations.repository import SQLiteVideoFactoryRepository
+
+            batch_id = 'batch_fake_checkpoint'
+            database = self.conn.execute("PRAGMA database_list").fetchone()[2]
+            repository = SQLiteVideoFactoryRepository(database)
+            repository.save_render_batch(RenderBatch(
+                batch_id, kwargs['owner_user_id'], kwargs['workflow_id'], kwargs['project_id'],
+                scene_count=len(story['scenes']),
+            ))
+        kwargs['on_job_accepted']('render',batch_id)
         api=self
         class Provider:
             provider_kind='google_flow'
@@ -198,12 +227,14 @@ class FakeVideoAPI:
             preferred_provider_kind='google_flow',allow_pre_submit_fallback=False)
         critic=CreativeCritic(self.model,receipt_root=self.root/'reviews')
         clips=[]
-        for scene in story['scenes']:
+        for index, scene in enumerate(story['scenes'], 1):
             start=next(f for f in story['generated_keyframes'] if f['scene_id']==scene['scene_id'])
             prompt=next(p for p in story['scene_prompts']['prompts'] if p['scene_id']==scene['scene_id'])
             request=compile_grounded_scene_request(owner_user_id=kwargs['owner_user_id'],workflow_id=kwargs['workflow_id'],
                 project_id=kwargs['project_id'],scene=scene,keyframe=start,keyframe_qc_receipt=story['keyframe_qc_receipt'],
                 package_digest=story['package_digest'],product_identity='Fixture Synthetic1',provider_model='fake-flow',scene_prompt=prompt)
+            if getattr(self, "checkpoint_render_batch", False):
+                runtime.store.mark_planned(request, render_batch_id=batch_id, scene_order=index)
             result=runtime.run(request)
             assert result.status=='completed',result
             assessment=review_video(path=result.video_path,package=story,critic=critic,stage='clip',scene_id=scene['scene_id'])

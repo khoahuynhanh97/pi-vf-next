@@ -75,7 +75,8 @@ def test_normalize_cli_pins_both_xlsx_snapshots_in_selected_handoff(tmp_path, ca
     assert all((batch/source["file"]).is_file() for source in handoff["sources"])
 
 
-def test_selection_snapshot_keeps_unselected_open_and_ack_hands_off_exact_rows(tmp_path, monkeypatch):
+@pytest.mark.parametrize("limit", [15, 20])
+def test_selection_snapshot_keeps_unselected_open_and_ack_hands_off_exact_rows(tmp_path, monkeypatch, limit):
     pool_path = tmp_path / "candidate_pool.csv"
     candidates = []
     source_snapshot = tmp_path / "source.xlsx"
@@ -89,19 +90,20 @@ def test_selection_snapshot_keeps_unselected_open_and_ack_hands_off_exact_rows(t
     _write_csv(pool_path, candidates)
     selected = tmp_path / "selected_products.csv"
     batch_root = tmp_path / "batches"
-    drafts = {r["candidate_id"]: {"selection_reason": "Explicit agent choice."} for r in candidates[:15]}
+    drafts = {r["candidate_id"]: {"selection_reason": "Explicit agent choice."} for r in candidates[:limit]}
     drafts[candidates[0]["candidate_id"]].update(script_draft='POV, "open box"\nshow item', claims_to_verify='\nclaim, pending')
     import tools.selection_handoff as handoff_module
     class FixedDateTime(datetime):
         @classmethod
         def now(cls, tz=None): return cls(2026,11,1,3,0,0,tzinfo=timezone.utc)
     monkeypatch.setattr(handoff_module,"datetime",FixedDateTime)
-    result = publish_selection(pool_path, selected, batch_root, batch_date="20261101", candidate_ids=[r["candidate_id"] for r in candidates[:15]], drafts=drafts)
+    result = publish_selection(pool_path, selected, batch_root, batch_date="20261101",
+                               candidate_ids=[r["candidate_id"] for r in candidates[:limit]], drafts=drafts, limit=limit)
     with pool_path.open(encoding="utf-8-sig", newline="") as f:
         after = list(csv.DictReader(f))
-    assert sum(r["state"] == "OPEN" for r in after) == 10
-    assert sum(r["state"] == "SELECTED" for r in after) == 15
-    assert result["selected_count"] == 15
+    assert sum(r["state"] == "OPEN" for r in after) == 25 - limit
+    assert sum(r["state"] == "SELECTED" for r in after) == limit
+    assert result["selected_count"] == limit
     assert result["created_at"] == "2026-11-01T03:00:00+00:00"
     with (Path(result["batch_dir"]) / "selected_products.csv").open(encoding="utf-8-sig", newline="") as f:
         selected_snapshot = list(csv.DictReader(f))
@@ -112,6 +114,12 @@ def test_selection_snapshot_keeps_unselected_open_and_ack_hands_off_exact_rows(t
                      "snapshot_id":"piintake_"+hashlib.sha256(f"pi-intake:{result['batch_id']}:{r['candidate_id']}".encode()).hexdigest()}
                     for n, r in enumerate(result["selected"], 1)]}
     batch = Path(result["batch_dir"])
+    if limit == 20:
+        from tools.spaiauto.intake import start_intake
+
+        intake = start_intake(batch / "selected_products.csv", tmp_path / "intake",
+                              handoff=batch / "handoff.json", db_path=tmp_path / "intake.db")
+        assert len(intake["rows"]) == 20
     broken=json.loads(json.dumps(ack)); broken["rows"][0]["snapshot_id"]="wrong_snapshot"
     (batch / "import_ack.json").write_text(json.dumps(broken), encoding="utf-8")
     with pytest.raises(ValueError,match="deterministic PI intake"):
@@ -120,7 +128,7 @@ def test_selection_snapshot_keeps_unselected_open_and_ack_hands_off_exact_rows(t
     apply_import_ack(pool_path, batch)
     with pool_path.open(encoding="utf-8-sig", newline="") as f:
         after_ack = list(csv.DictReader(f))
-    assert sum(r["state"] == "HANDED_OFF" for r in after_ack) == 15
+    assert sum(r["state"] == "HANDED_OFF" for r in after_ack) == limit
 
 
 def test_agent_resolves_search_link_and_later_sync_keeps_handed_off(tmp_path):

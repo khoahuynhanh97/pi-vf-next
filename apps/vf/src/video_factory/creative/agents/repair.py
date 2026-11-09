@@ -108,6 +108,15 @@ def revise_scene_prompt(*, director, dossier, script, bundle, proposal, review, 
         if review.stage=='clip' and proposal.scope=='prompt':
             if (prompt.start_prompt,prompt.end_prompt,prompt.negative_prompt)!=(original.start_prompt,original.end_prompt,original.negative_prompt):
                 raise ValueError('clip prompt repair must preserve accepted keyframes')
+        if getattr(script, 'scene_bible', None):
+            from .director import bind_prompt_bible
+            prompt = replace(
+                prompt,
+                start_prompt=bind_prompt_bible(prompt.start_prompt, script.scene_bible),
+                video_prompt=bind_prompt_bible(prompt.video_prompt, script.scene_bible),
+                end_prompt=bind_prompt_bible(prompt.end_prompt, script.scene_bible) if prompt.end_prompt else '',
+            )
+            updates[scene_id] = prompt
     revised = replace(bundle, prompts=tuple(updates.get(p.scene_id,p) for p in bundle.prompts),
         evaluator_receipt={'provider':result.provider,'model':result.model,'route':dict(result.route_receipt or {}),
                            'prompt_version':'visual-director-targeted-repair-v1','review_digest':review.digest})

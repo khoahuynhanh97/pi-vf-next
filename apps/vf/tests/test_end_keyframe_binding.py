@@ -5,6 +5,7 @@ import sqlite3
 from pathlib import Path
 
 import pytest
+from PIL import Image
 
 from video_factory.integrations.scene_renderer import (
     SceneRenderOperationStore,
@@ -98,6 +99,47 @@ def test_missing_or_mismatched_end_is_rejected(tmp_path: Path) -> None:
             keyframe_qc_receipt=receipt, package_digest="sha256:package",
             product_identity="Baseus WM02", provider_model="provider",
         )
+
+
+@pytest.mark.parametrize("verdict", ["unknown", "not_performed"])
+def test_low_qc_renders_decodable_frames_with_bound_ungraded_receipt(tmp_path: Path, verdict: str) -> None:
+    start, end, receipt = _inputs(tmp_path)
+    for frame in (start, end):
+        path = Path(frame["image_path"])
+        Image.new("RGB", (108, 192), "red").save(path)
+        frame["sha256"] = hashlib.sha256(path.read_bytes()).hexdigest()
+    receipt.update(verdict=verdict, findings={})
+    kwargs = dict(
+        owner_user_id="owner", workflow_id="workflow", project_id="project",
+        scene=_scene(), keyframe=start, end_keyframe=end,
+        keyframe_qc_receipt=receipt, package_digest="sha256:package",
+        product_identity="Baseus WM02", provider_model="end-capable-provider",
+    )
+    with pytest.raises(ValueError, match="PASS"):
+        compile_grounded_scene_request(**kwargs)
+    request = compile_grounded_scene_request(**kwargs, qc_level="low")
+    assert request.reference_image_paths == (start["image_path"],)
+    assert request.end_keyframe and request.end_keyframe.sha256 == end["sha256"]
+
+    receipt["verdict"] = "fail"
+    with pytest.raises(ValueError, match="PASS"):
+        compile_grounded_scene_request(**kwargs, qc_level="low")
+    receipt["verdict"] = verdict
+    receipt["artifact_digest"] = "sha256:other-package"
+    with pytest.raises(ValueError, match="artifact digest"):
+        compile_grounded_scene_request(**kwargs, qc_level="low")
+    receipt["artifact_digest"] = "sha256:package"
+    receipt["hard_failure"] = True
+    with pytest.raises(ValueError, match="hard failure"):
+        compile_grounded_scene_request(**kwargs, qc_level="low")
+    receipt.pop("hard_failure")
+    Image.new("RGB", (108, 192), "blue").save(end["image_path"])
+    with pytest.raises(ValueError, match="changed after QC"):
+        compile_grounded_scene_request(**kwargs, qc_level="low")
+    Path(end["image_path"]).write_bytes(b"not an image")
+    end["sha256"] = hashlib.sha256(Path(end["image_path"]).read_bytes()).hexdigest()
+    with pytest.raises(ValueError, match="decode"):
+        compile_grounded_scene_request(**kwargs, qc_level="low")
 
 
 def test_unsupported_provider_never_submits_end_conditioned_scene(tmp_path: Path) -> None:

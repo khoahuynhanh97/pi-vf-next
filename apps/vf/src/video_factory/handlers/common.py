@@ -628,14 +628,31 @@ def _locked_research_dossier(
         # identity and visual observations from the passing QC manifest.
         claims = []
 
-    report = QCReportRepository(connection).get_latest_report(workflow_id, QCStage.IMAGE)
-    if report is None or report.verdict != QCVerdict.PASS:
-        raise ValueError("a passing persisted Image QC report is required before creative generation")
+    report = None
+    exchange_lock = None
+    if ((aggregate.get("creative_policy") or {}).get("qc_level") == "low"
+            and _is_exchange_source_context(source_context)):
+        from video_factory.qc.normalization import _media_manifest
+
+        lock_digest = locked_pack.get("manifest_digest")
+        approved = {image["asset_id"]: image.get("sha256") for image in source_context.get("images", [])
+                    if image.get("asset_id") and not image.get("identity_conflict")}
+        eligible_manifest = [
+            item for item in _media_manifest(locked_pack)
+            if item["eligible"] and item["sha256"] == approved.get(item["asset_id"])
+        ]
+        if locked_pack.get("status") != "locked" or not lock_digest or not eligible_manifest:
+            raise ValueError("locked Exchange pack has no verified PI reference")
+        exchange_lock = (f"pi-lock:{lock_digest}", eligible_manifest)
+    else:
+        report = QCReportRepository(connection).get_latest_report(workflow_id, QCStage.IMAGE)
+        if report is None or report.verdict != QCVerdict.PASS:
+            raise ValueError("a passing persisted Image QC report is required before creative generation")
+        eligible_manifest = (report.findings or {}).get("eligible_reference_manifest") or []
 
     # Without a trusted feature claim, use only the locked product name and
     # details observed in images covered by this passing Image QC report.
     if not claims:
-        eligible_manifest = (report.findings or {}).get("eligible_reference_manifest") or []
         primary_asset_ids = [
             str(item.get("asset_id")) for item in eligible_manifest
             if isinstance(item, dict) and item.get("eligible") is True and item.get("asset_id")
@@ -665,6 +682,7 @@ def _locked_research_dossier(
         workflow_id=workflow_id,
         resource_pack=resource_pack,
         qc_report=report,
+        exchange_lock=exchange_lock,
         research_snapshot={
             "claims": claims,
             "source_refs": sorted(set(official_sources or usable_urls) | trusted_urls),

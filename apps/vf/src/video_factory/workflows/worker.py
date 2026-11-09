@@ -16,6 +16,7 @@ from video_factory.workflows.outbox_dispatcher import (
     OutboxDispatcher,
 )
 from video_factory.workflows.outbox_repository import OutboxRepository
+from video_factory.workflows.runtime_control import PROVIDER_AVAILABILITY_PAUSE_CODES, is_shared_infra_blocker
 
 logger = logging.getLogger(__name__)
 
@@ -26,14 +27,6 @@ def _tick_ui_maintenance(connection):
         configured_maintenance(connection)
     except Exception as maintenance_error:
         logger.warning('Flow maintenance tick stopped (%s)', type(maintenance_error).__name__)
-    try:
-        from video_factory.integrations.capacity import ProviderCapacityStore
-        store = ProviderCapacityStore(connection)
-        reclaimed = store.reclaim_expired_operations(timeout_minutes=10)
-        if reclaimed > 0:
-            logger.info('Reclaimed %d expired operation capacity slots', reclaimed)
-    except Exception as reclaim_error:
-        logger.warning('Operation capacity reclaim failed (%s)', type(reclaim_error).__name__)
 
 
 def _should_pause_worker(
@@ -43,13 +36,9 @@ def _should_pause_worker(
 ) -> bool:
     if not pause:
         return False
-    from video_factory.workflows.runtime_control import (
-        is_shared_infra_blocker,
-        workflow_has_inflight_operation,
-    )
     pause_code = str(pause.get("code") or "")
     paused_wf = str(pause.get("workflow_id") or "")
-    if pause_code == "PROVIDER_CAPACITY_WAIT":
+    if pause_code in PROVIDER_AVAILABILITY_PAUSE_CODES:
         return False
     is_shared = is_shared_infra_blocker(pause_code)
     return is_shared or not paused_wf
@@ -72,13 +61,13 @@ def _capacity_dispatch_scope(connection, workflow_ids, workflow_id_prefix):
     scope = _scoped_workflow_ids(connection, workflow_ids, workflow_id_prefix)
     if scope is None:
         scope = [str(row[0]) for row in connection.execute("SELECT workflow_id FROM workflow")]
-    from video_factory.workflows.runtime_control import workflow_has_inflight_operation
-    return [workflow_id for workflow_id in scope if workflow_has_inflight_operation(connection, workflow_id)]
+    from video_factory.workflows.runtime_control import workflow_can_advance_during_capacity_wait
+    return [workflow_id for workflow_id in scope
+            if workflow_can_advance_during_capacity_wait(connection, workflow_id)]
 
 
 def _pause_dispatch_scope(connection, workflow_ids, workflow_id_prefix, pause):
     scope = _scoped_workflow_ids(connection, workflow_ids, workflow_id_prefix)
-    from video_factory.workflows.runtime_control import is_shared_infra_blocker
     local_pause = bool(pause and not is_shared_infra_blocker(pause.get("code")) and pause.get("workflow_id"))
     if scope is None and local_pause:
         scope = [str(row[0]) for row in connection.execute("SELECT workflow_id FROM workflow")]
@@ -218,10 +207,8 @@ def run_worker(
             if _should_pause_worker(current_pause, workflow_ids, connection=connection):
                 return DispatchReport(claimed=0, succeeded=0, failed=0, quarantined=0)
             dispatch_ids = _pause_dispatch_scope(connection, workflow_ids, workflow_id_prefix, current_pause)
-            if current_pause and current_pause.get("code") == "PROVIDER_CAPACITY_WAIT":
-                inflight_ids = _capacity_dispatch_scope(connection, workflow_ids, workflow_id_prefix)
-                if inflight_ids:
-                    dispatch_ids = inflight_ids
+            if current_pause and current_pause.get("code") in PROVIDER_AVAILABILITY_PAUSE_CODES:
+                dispatch_ids = _capacity_dispatch_scope(connection, workflow_ids, workflow_id_prefix)
             dispatcher.reclaim_expired()
             report = dispatcher.process_batch(
                 # Keep auto progression serial: do not lease jobs whose QC
@@ -239,10 +226,8 @@ def run_worker(
                     stop_event.wait(poll_interval)
                     continue
                 dispatch_ids = _pause_dispatch_scope(connection, workflow_ids, workflow_id_prefix, current_pause)
-                if current_pause and current_pause.get("code") == "PROVIDER_CAPACITY_WAIT":
-                    inflight_ids = _capacity_dispatch_scope(connection, workflow_ids, workflow_id_prefix)
-                    if inflight_ids:
-                        dispatch_ids = inflight_ids
+                if current_pause and current_pause.get("code") in PROVIDER_AVAILABILITY_PAUSE_CODES:
+                    dispatch_ids = _capacity_dispatch_scope(connection, workflow_ids, workflow_id_prefix)
                 dispatcher.reclaim_expired()
                 dispatcher.process_batch(batch_size=1,
                     workflow_id_prefix=None if dispatch_ids is not None else workflow_id_prefix,

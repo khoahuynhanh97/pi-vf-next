@@ -8,6 +8,8 @@ import time
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
+
+import pytest
 from PIL import Image
 
 from video_factory.integrations.keyframe_provider import (
@@ -326,7 +328,10 @@ def test_keyframe_qc_requires_every_generated_frame_to_pass(tmp_path: Path) -> N
     assert report.findings["selected_candidates"][0]["sha256"] == report.findings["items"][0]["sha256"]
 
 
-def test_keyframe_qc_reports_mismatch_with_approved_script_scene(tmp_path: Path) -> None:
+@pytest.mark.parametrize(("essential_only", "script_mismatch"), [(False, True), (True, True), (True, False)])
+def test_keyframe_qc_reports_mismatch_with_approved_script_scene(
+    tmp_path: Path, essential_only: bool, script_mismatch: bool,
+) -> None:
     reference = tmp_path / "script-reference.png"
     keyframe = tmp_path / "script-keyframe.png"
     _write_image(reference, "white")
@@ -344,18 +349,18 @@ def test_keyframe_qc_reports_mismatch_with_approved_script_scene(tmp_path: Path)
         def evaluate_multiple_images(self, _images: list[str], prompt: str, **_: Any) -> dict[str, Any]:
             self.prompt = prompt
             return {
-                "identity_consistency": 46,
-                "scene_adherence": 27,
-                "visual_cleanliness": 18,
-                "total_score": 91,
-                "verdict": "pass",
+                "identity_consistency": 46 if script_mismatch else 30,
+                "scene_adherence": 27 if script_mismatch else 15,
+                "visual_cleanliness": 18 if script_mismatch else 10,
+                "total_score": 91 if script_mismatch else 55,
+                "verdict": "pass" if script_mismatch else "fail",
                 "hard_failure": False,
                 "source_branding_detected": False,
                 "identity_mismatch": False,
                 "prompt_reference_consistent": True,
-                "script_adherence": False,
+                "script_adherence": not script_mismatch,
                 "important_details_preserved": True,
-                "composition_usable": True,
+                "composition_usable": script_mismatch,
                 "animation_suitable": True,
                 "black_bars_detected": False,
                 "recommended_action": "Show the speaker being placed on the picnic blanket as narrated.",
@@ -398,10 +403,15 @@ def test_keyframe_qc_reports_mismatch_with_approved_script_scene(tmp_path: Path)
         },
         product=NormalizedProduct(brand="Tribit", model="XSound Go"),
         evaluator=evaluator,
+        essential_only=essential_only,
     )
 
     assert "Approved script scene" in evaluator.prompt
     assert "Đặt loa xuống và tận hưởng âm nhạc." in evaluator.prompt
+    if not script_mismatch:
+        assert report.verdict == QCVerdict.PASS
+        assert report.findings["recovery_plan"]["frames"] == []
+        return
     assert report.verdict == QCVerdict.FAIL
     assert report.findings["items"][0]["script_adherence"] is False
     recovery = report.findings["recovery_plan"]["frames"][0]

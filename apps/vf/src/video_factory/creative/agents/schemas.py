@@ -70,6 +70,13 @@ REPAIR_PROPOSAL_SCHEMA = _object({
 
 # The four-agent parser requires an explicit omission decision even when END is used.
 # Preserve the legacy schema contract for its other callers.
+SCENE_BIBLE_SCHEMA = _object({
+    'environment': _STRING,
+    'lighting': _STRING,
+    'pov_hand': _STRING,
+    'camera_baseline': _STRING,
+})
+
 DIRECTOR_SCRIPT_SCHEMA = deepcopy(SCRIPT_SCENE_PLAN_V2_SCHEMA)
 DIRECTOR_SCRIPT_SCHEMA['properties']['scenes']['items']['required'].append('end_keyframe_omission_reason')
 

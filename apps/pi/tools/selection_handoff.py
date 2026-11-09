@@ -26,6 +26,7 @@ from tools.spaiauto.storage import atomic_json, digest, read_json
 from tools.spaiauto.links import link_kind, normalize_market_url
 
 SHEETS = ("1gZud8PjalrF493toqlniKOeh8XPCw73B7ZpQ7FLHT-Y", "1QdGMCdADxYXCAY02aLSILX9FX_XF_cTLULvOKCvzOho")
+MAX_SHEET_SELECTION = 20
 POOL_FIELDS = "candidate_id product_name source_url platform shop_name category brand_hint requested_variant price_hint_vnd original_price_hint_vnd sold_hint rating_hint rating_count_hint shop_type_hint commission_percent_hint trend_reason video_concept risk_notes observed_at source_refs_json state selected_batch_id selection_reason".split()
 SELECTED_FIELDS = "product_name source_url category candidate_id platform brand_hint requested_variant price_hint_vnd selection_rank selection_reason video_concept script_draft claims_to_verify source_refs_json observed_at".split()
 SOURCE_MAP = {
@@ -271,7 +272,8 @@ def publish_selection(pool: Path, selected_csv: Path, batch_dir: Path, *, batch_
 def _publish_selection_locked(pool: Path, selected_csv: Path, batch_dir: Path, *, batch_date: str,
                               candidate_ids: list[str], drafts: dict[str, dict] | None, limit: int) -> dict:
     if not re.fullmatch(r"\d{8}", batch_date): raise ValueError("batch_date must use YYYYMMDD.")
-    if not 1 <= limit <= 15 or len(candidate_ids) > limit or len(set(candidate_ids)) != len(candidate_ids): raise ValueError("Selection must contain unique candidates within 1..15.")
+    if not 1 <= limit <= MAX_SHEET_SELECTION or len(candidate_ids) > limit or len(set(candidate_ids)) != len(candidate_ids):
+        raise ValueError(f"Selection must contain unique candidates within 1..{MAX_SHEET_SELECTION}.")
     if selected_csv.name != "selected_products.csv": raise ValueError("Selected snapshot file must be named selected_products.csv.")
     rows = _read_pool(pool); ready_matches=[]
     for handoff_path in batch_dir.glob("*/handoff.json") if batch_dir.exists() else []:

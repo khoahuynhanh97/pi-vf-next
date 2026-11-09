@@ -5,22 +5,20 @@ and late-input catch-up execution.
 """
 from __future__ import annotations
 
-import errno
 import hashlib
 import json
-import os
 import time
-from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 from datetime import datetime, time as dtime
 from pathlib import Path
 from typing import Any, Callable
 from uuid import uuid4
 
-from automation.storage import atomic_json
+from automation.storage import LedgerLockTimeout, atomic_json, exclusive_file_lock
 
 from automation.config import (
     BANGKOK_TZ,
+    DAILY_VIDEO_LIMIT,
     RUNTIME_DIR,
     now_bangkok,
     today_bangkok_str,
@@ -41,44 +39,15 @@ class ScheduleRecord:
     duration_seconds: float
     error: str | None = None
     provider_mode: str = "fake"
+    sheet_batches_sha256: str | None = None
 
 
 class CorruptLedgerError(RuntimeError):
     pass
 
 
-class LedgerLockTimeout(TimeoutError):
-    pass
-
-
-@contextmanager
 def _ledger_lock(timeout: float = 5.0):
-    # Keep this file at a stable path. The OS releases the lock when the handle
-    # closes, including when a scheduler process exits unexpectedly.
-    lock_path = LEDGER_PATH.with_suffix(LEDGER_PATH.suffix + ".lock")
-    lock_path.parent.mkdir(parents=True, exist_ok=True)
-    deadline = time.monotonic() + timeout
-    with lock_path.open("a+b") as lock_file:
-        while True:
-            try:
-                if os.name == "nt":
-                    import msvcrt
-
-                    lock_file.seek(0)
-                    msvcrt.locking(lock_file.fileno(), msvcrt.LK_NBLCK, 1)
-                else:
-                    import fcntl
-
-                    fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-                break
-            except OSError as exc:
-                if exc.errno not in (errno.EACCES, errno.EAGAIN, errno.EDEADLK):
-                    raise
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    raise LedgerLockTimeout(f"Timed out waiting for scheduler ledger lock: {lock_path}") from exc
-                time.sleep(min(0.05, remaining))
-        yield
+    return exclusive_file_lock(LEDGER_PATH, timeout, label="scheduler ledger")
 
 
 def load_ledger() -> list[dict[str, Any]]:
@@ -125,6 +94,7 @@ def record_run(record: ScheduleRecord) -> None:
 
 def should_run_today(
     csv_path: Path, target_date: str | None = None, force: bool = False, *, provider_mode: str = "fake",
+    sheet_batches_sha256: str | None = None,
 ) -> tuple[bool, str]:
     """Check if a pipeline run should be scheduled today or if input changed."""
     if force:
@@ -140,7 +110,8 @@ def should_run_today(
     records = load_ledger()
     for rec in reversed(records):
         if (rec.get("date") == date_str and rec.get("csv_sha256") == current_sha
-                and rec.get("provider_mode", "fake") == provider_mode):
+                and rec.get("provider_mode", "fake") == provider_mode
+                and rec.get("sheet_batches_sha256") == sheet_batches_sha256):
             if rec.get("status") == "success":
                 return False, f"Already completed for {date_str} with CSV digest {current_sha[:8]}"
             elif rec.get("status") == "partial":
@@ -155,23 +126,31 @@ def should_run_today(
 
 def trigger_daily_run(
     spark_csv: Path | str | None = None,
-    limit: int = 1,
+    limit: int | None = None,
     scenes: int = 4,
     provider_mode: str = "fake",
     force: bool = False,
     date: str | None = None,
     offline_intake: bool | None = None,
-    qc_level: str = "high",
+    qc_level: str = "low",
     acquire: bool = False,
 ) -> PipelineRunResult | dict[str, Any]:
     """Trigger a daily run with deduplication and late input handling."""
     load_ledger()  # Stop before acquisition even when force bypasses deduplication.
     target_date = date or today_bangkok_str()
+    if limit is None:
+        limit = DAILY_VIDEO_LIMIT if spark_csv is None else 1
+    if spark_csv is None and not 1 <= limit <= DAILY_VIDEO_LIMIT:
+        raise ValueError(f"Sheet limit must be between 1 and {DAILY_VIDEO_LIMIT}")
     sheet_intake = prepare_sheet_intake(target_date, limit, acquire=acquire) if spark_csv is None else None
+    ready = (sheet_intake or {}).get("exchange_batches")
+    sheet_batches_sha256 = (hashlib.sha256(json.dumps([limit, ready], sort_keys=True).encode()).hexdigest()
+                            if isinstance(ready, list) else None)
     selection_csv = (sheet_intake or {}).get("selection_csv") or spark_csv
     if selection_csv is not None:
         csv_p = Path(selection_csv).resolve()
-        needed, reason = should_run_today(csv_p, target_date=target_date, force=force, provider_mode=provider_mode)
+        needed, reason = should_run_today(csv_p, target_date=target_date, force=force, provider_mode=provider_mode,
+                                         sheet_batches_sha256=sheet_batches_sha256)
         if not needed:
             return {"status": "skipped", "reason": reason, "date": target_date, "csv_path": str(csv_p)}
 
@@ -196,8 +175,15 @@ def trigger_daily_run(
         duration_seconds=run_res.duration_seconds,
         error=run_res.error,
         provider_mode=provider_mode,
+        sheet_batches_sha256=sheet_batches_sha256,
     )
     record_run(record)
+    if run_res.status not in ("success", "skipped"):
+        try:
+            from automation.doctor_agent import DoctorAgent
+            DoctorAgent().handle_pipeline_incident(run_res)
+        except Exception as doctor_exc:
+            logger.warning("Doctor agent auto-incident handler failed: %s", doctor_exc)
     return run_res
 
 
@@ -206,10 +192,10 @@ def run_scheduler_daemon(
     target_minute: int = 0,
     check_interval_seconds: int = 60,
     spark_csv: Path | str | None = None,
-    limit: int = 1,
+    limit: int | None = None,
     scenes: int = 4,
     provider_mode: str = "fake",
-    qc_level: str = "high",
+    qc_level: str = "low",
     acquire: bool = False,
     on_result: Callable[[PipelineRunResult], None] | None = None,
 ) -> None:

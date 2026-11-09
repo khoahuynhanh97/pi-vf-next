@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -201,6 +202,7 @@ def compile_keyframe_requests(
     previous_package: dict[str, Any] | None = None,
     prompt_bundle=None,
     backend_profile=None,
+    legacy_implicit_end_recovery: bool = False,
 ) -> tuple[KeyframeGenerationRequest, ...]:
     if prompt_bundle is not None:
         from .agents.director import validate_bundle
@@ -235,9 +237,15 @@ def compile_keyframe_requests(
         if isinstance(item, dict) and item.get("frame_id")
     }
     operator_stepwise = isinstance(recovery_plan, dict) and bool(recovery_plan.get("operator_stepwise"))
+    approved_end_frames = {
+        f"{scene.scene_id}-end" for scene in script.scenes
+        if scene.end_keyframe_policy in {"generated", "required"}
+    }
     for frame_id in tuple(recovery_by_frame):
         if frame_id.endswith("-start") and not operator_stepwise:
             end_frame_id = f"{frame_id.removesuffix('-start')}-end"
+            if end_frame_id not in approved_end_frames and not legacy_implicit_end_recovery:
+                continue
             recovery_by_frame.setdefault(
                 end_frame_id,
                 {
@@ -560,6 +568,27 @@ def plan_initial_storyboard_recovery(
             if end_fid not in feedback_map:
                 feedback_map[end_fid] = "START frame was regenerated; update END frame to match new START frame"
     return recovery_frame_ids, feedback_map
+
+
+def prepare_keyframe_generation_request(
+    request: KeyframeGenerationRequest, *, feedback: str = "", conditioning_start_path: str = "",
+) -> KeyframeGenerationRequest:
+    """Apply the same conditioning when submitting and reconciling a keyframe."""
+    if conditioning_start_path:
+        request = replace(
+            request,
+            prompt=(
+                request.prompt
+                + "\nThe first attached image is the approved START frame of this same scene. "
+                "Keep its exact table material, shape, furniture layout, camera context, "
+                "product surface and pool position. Show only the specified action and end state. "
+                "If water is specified near but not on the product, keep the product completely dry."
+            ),
+            reference_image_paths=(conditioning_start_path, *request.reference_image_paths)[:4],
+        )
+    if feedback:
+        request = replace(request, prompt=request.prompt + f"\n[QC REVISION GUIDANCE: {feedback}]")
+    return request
 
 
 def resolve_reusable_storyboard_frames(

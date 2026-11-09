@@ -9,3 +9,5 @@ Follow **Move → Verify → Integrate → Automate → Optimize**. The original
 - Phase 01 acceptance requires independent installation and offline verification of both transferred apps with temporary data. Final cutover requires the unified pipeline and scheduler to run without either original checkout path.
 
 The [four-phase roadmap](docs/platform/08-migration-roadmap.md) and [Master Prompt](docs/platform/MASTER-PROMPT.md) govern delivery. Older architecture and pilot documents provide context.
+
+Start with the [PI/VF handbook](docs/PI-VF-HANDBOOK.md) for the verified runtime snapshot, current scope, and release blockers. Check the working directory, HEAD, and local diff before editing. The scheduled runtime checkout and development worktree may differ. Report the checkout, exact verification, and remaining gaps when handing off work.

@@ -19,18 +19,19 @@ from automation.scheduler import daily_trigger
 
 @pytest.mark.parametrize('command, extra', [('run', []), ('trigger', []), ('resume', ['--run-id', 'saved'])])
 @pytest.mark.parametrize('level', [None, 'low', 'middle'])
-def test_unified_cli_defaults_new_runs_to_high_and_preserves_resume_omission(monkeypatch, command, extra, level):
+def test_unified_cli_keeps_manual_high_and_daily_low_defaults(monkeypatch, command, extra, level):
     received = []
     monkeypatch.setattr(cli, 'cmd_' + command, lambda args: received.append(args) or 0)
     args = [command, *extra]
     if level:
         args.extend(['--qc-level', level])
     assert cli.main(args) == 0
-    assert received[0].qc_level == (level or (None if command == 'resume' else 'high'))
+    defaults = {'run': 'high', 'trigger': 'low', 'resume': None}
+    assert received[0].qc_level == (level or defaults[command])
 
 
-@pytest.mark.parametrize('level, expected', [(None, 'high'), ('low', 'low'), ('middle', 'middle')])
-def test_daily_trigger_forwards_high_default_and_explicit_levels(tmp_path, monkeypatch, level, expected):
+@pytest.mark.parametrize('level, expected', [(None, 'low'), ('high', 'high'), ('middle', 'middle')])
+def test_daily_trigger_forwards_low_default_and_explicit_levels(tmp_path, monkeypatch, level, expected):
     received = []
     monkeypatch.setattr(daily_trigger, 'prepare_sheet_intake', lambda *a, **kw: {})
     monkeypatch.setattr(daily_trigger, 'LEDGER_PATH', tmp_path / 'ledger.json')

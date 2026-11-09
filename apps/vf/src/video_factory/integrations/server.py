@@ -2249,10 +2249,19 @@ def render(
     }
     package_v2 = sb_data.get("schema_version") == "storyboard-package-v2"
     keyframe_qc_receipt = sb_data.get("keyframe_qc_receipt")
+    render_qc_level = "middle"
+    persisted_storyboard = workflow.get("storyboard") or {}
+    if ((workflow.get("creative_policy") or {}).get("qc_level") == "low"
+            and persisted_storyboard.get("package_digest") == sb_data.get("package_digest")
+            and isinstance(persisted_storyboard.get("keyframe_qc_receipt"), dict)):
+        render_qc_level = "low"
+        keyframe_qc_receipt = persisted_storyboard["keyframe_qc_receipt"]
     if sb_data.get('creative_mode') == 'four_agent':
         from video_factory.creative.agents.gates import require_storyboard_qc_pass
         try:
-            require_storyboard_qc_pass(sb_data, qc_level=sb_data.get("qc_level", "middle"))
+            require_storyboard_qc_pass(
+                {**sb_data, "keyframe_qc_receipt": keyframe_qc_receipt}, qc_level=render_qc_level,
+            )
         except (KeyError, ValueError, OSError):
             return {'ok':False, 'status':'failed', 'code':'KEYFRAME_QC_REQUIRED',
                     'error':'Current keyframe QC PASS for the storyboard package is required'}
@@ -2563,6 +2572,7 @@ def render(
                     end_keyframe=generated_end_keyframe,
                     keyframe_qc_receipt=keyframe_qc_receipt,
                     package_digest=str(sb_data.get("package_digest") or ""),
+                    qc_level=render_qc_level,
                     product_identity=product_identity,
                     provider_model=provider_model,
                     aspect_ratio=aspect_ratio,
@@ -2598,7 +2608,8 @@ def render(
         if continuous and continuous[0]:
             return {'ok':False, 'status':'failed', 'code':'INVALID_CONTINUITY',
                     'error':'The first scene cannot continue a previous clip'}
-        if any(continuous) and sb_data.get('qc_level', 'middle') != 'high':
+        low_qc_cut = any(continuous) and render_qc_level == 'low'
+        if any(continuous) and not low_qc_cut and sb_data.get('qc_level', 'middle') != 'high':
             return {'ok':False, 'status':'failed', 'code':'CONTINUITY_REQUIRES_HIGH_QC',
                     'error':'Continuous scenes require high clip and endpoint QC'}
         # Immutable batch membership permits reuse of an unaffected completed scene
@@ -2606,6 +2617,8 @@ def render(
         context_path = _workspace_path()/'creative_batches'/(durable_batch_id+'.json')
         context_path.parent.mkdir(parents=True,exist_ok=True)
         context={**sb_data,'_batch_operation_ids':[req.request_id for _,req in compiled_requests]}
+        if low_qc_cut:
+            context['_continuity_mode'] = 'independent_keyframes'
         if context_path.exists():
             if json.loads(context_path.read_text(encoding='utf8'))!=json.loads(json.dumps(context)):
                 return {'ok':False,'status':'failed','code':'CREATIVE_BATCH_INPUT_CHANGED',
@@ -4239,73 +4252,87 @@ def export(
             return {'ok':False, 'status':'failed', 'code':'FINAL_CONTENT_REQUIRED',
                     'error':'Canonical high-QC render requires its current final content PASS'}
 
-    try:
-        from video_factory.qc.repository import QCReportRepository
-        from video_factory.qc.models import QCStage
+    matching_report = None
+    if provenance.get('qc_level') == 'low':
+        from video_factory.creative.agents.video_review import require_final_pass
 
-        appr_svc = _approval_service()
-        db_candidates: list[tuple[sqlite3.Connection, bool]] = []
-        if appr_svc is not None and getattr(appr_svc, "conn", None) is not None:
-            db_candidates.append((appr_svc.conn, False))
-        elif appr_svc is not None and getattr(appr_svc, "connection", None) is not None:
-            db_candidates.append((appr_svc.connection, False))
-        elif (
-            appr_svc is not None and getattr(appr_svc, "_connection", None) is not None
-        ):
-            db_candidates.append((appr_svc._connection, False))
+        technical = rend_data.get("technical_qc")
+        try:
+            if (not isinstance(technical, dict) or technical.get("verdict") != "PASS"
+                    or technical.get("sha256") != source_sha256):
+                raise ValueError("Technical receipt is missing or bound to different bytes")
+            require_final_pass(rend_data)
+        except (KeyError, TypeError, ValueError, OSError) as exc:
+            return {"ok": False, "status": "failed", "code": "FINAL_TECHNICAL_REQUIRED",
+                    "error": f"Export requires current technical evidence: {exc}"}
+    else:
+        try:
+            from video_factory.qc.repository import QCReportRepository
+            from video_factory.qc.models import QCStage
 
-        appr_p = _canonical_approval_db_path()
-        if appr_p.exists():
-            db_candidates.append((sqlite3.connect(appr_p), True))
-        vf_p = _db_path()
-        if vf_p.exists() and vf_p != appr_p:
-            db_candidates.append((sqlite3.connect(vf_p), True))
+            appr_svc = _approval_service()
+            db_candidates: list[tuple[sqlite3.Connection, bool]] = []
+            if appr_svc is not None and getattr(appr_svc, "conn", None) is not None:
+                db_candidates.append((appr_svc.conn, False))
+            elif appr_svc is not None and getattr(appr_svc, "connection", None) is not None:
+                db_candidates.append((appr_svc.connection, False))
+            elif (
+                appr_svc is not None and getattr(appr_svc, "_connection", None) is not None
+            ):
+                db_candidates.append((appr_svc._connection, False))
 
-        matching_report = None
-        for conn, should_close in db_candidates:
-            try:
-                cur = conn.execute(
-                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name='product_video_qc_reports'"
-                )
-                if not cur.fetchone():
+            appr_p = _canonical_approval_db_path()
+            if appr_p.exists():
+                db_candidates.append((sqlite3.connect(appr_p), True))
+            vf_p = _db_path()
+            if vf_p.exists() and vf_p != appr_p:
+                db_candidates.append((sqlite3.connect(vf_p), True))
+
+            matching_report = None
+            for conn, should_close in db_candidates:
+                try:
+                    cur = conn.execute(
+                        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='product_video_qc_reports'"
+                    )
+                    if not cur.fetchone():
+                        continue
+                    qc_repo = QCReportRepository(conn)
+                    rep = qc_repo.get_verified_pass_report(
+                        owner_user_id=owner,
+                        project_id=proj_id,
+                        workflow_id=target_wf_id,
+                        artifact_id=artifact_id,
+                        artifact_version=export_version,
+                        stage=QCStage.VIDEO,
+                        expected_sha256=source_sha256,
+                        artifact_path=str(src_path),
+                    )
+                    if rep is not None:
+                        matching_report = rep
+                        break
+                except Exception:
                     continue
-                qc_repo = QCReportRepository(conn)
-                rep = qc_repo.get_verified_pass_report(
-                    owner_user_id=owner,
-                    project_id=proj_id,
-                    workflow_id=target_wf_id,
-                    artifact_id=artifact_id,
-                    artifact_version=export_version,
-                    stage=QCStage.VIDEO,
-                    expected_sha256=source_sha256,
-                    artifact_path=str(src_path),
-                )
-                if rep is not None:
-                    matching_report = rep
-                    break
-            except Exception:
-                continue
-            finally:
-                if should_close:
-                    try:
-                        conn.close()
-                    except Exception:
-                        pass
+                finally:
+                    if should_close:
+                        try:
+                            conn.close()
+                        except Exception:
+                            pass
 
-        if not matching_report:
+            if not matching_report:
+                return {
+                    "ok": False,
+                    "status": "failed",
+                    "error": f"VIDEO_QC_REQUIRED: No verified PASS Video QC report bound to exact composite lineage (owner={owner}, project={proj_id}, workflow={target_wf_id}, artifact={artifact_id}, version={export_version}, sha={source_sha256})",
+                    "code": "VIDEO_QC_REQUIRED",
+                }
+        except Exception as exc:
             return {
                 "ok": False,
                 "status": "failed",
-                "error": f"VIDEO_QC_REQUIRED: No verified PASS Video QC report bound to exact composite lineage (owner={owner}, project={proj_id}, workflow={target_wf_id}, artifact={artifact_id}, version={export_version}, sha={source_sha256})",
+                "error": f"VIDEO_QC_REQUIRED: Could not verify Video QC report: {exc}",
                 "code": "VIDEO_QC_REQUIRED",
             }
-    except Exception as exc:
-        return {
-            "ok": False,
-            "status": "failed",
-            "error": f"VIDEO_QC_REQUIRED: Could not verify Video QC report: {exc}",
-            "code": "VIDEO_QC_REQUIRED",
-        }
     brief_obj = project.creative_brief
     claims_list = [
         safe_claim
@@ -4454,7 +4481,7 @@ def export(
     })
     qc_reports = {
         "image": None,
-        "video": matching_report.report_id,
+        "video": matching_report.report_id if matching_report else None,
     }
     # A reservation ceiling is not an invoice. Keep caller-supplied spend out
     # of immutable provenance until provider usage has been reconciled.

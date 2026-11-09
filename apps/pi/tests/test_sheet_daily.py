@@ -54,6 +54,58 @@ def test_daily_replay_reuses_selection_batch_intake_and_ack(tmp_path):
     assert refs[0]["observed_at_basis"] == "snapshot_file_mtime"
 
 
+def test_daily_publishes_completed_row_while_other_row_is_pending(tmp_path, monkeypatch):
+    from pathlib import Path
+    from tools import sheet_daily
+
+    workbooks = {SHEETS[0]: _workbook(11, 22), SHEETS[1]: _workbook(33, 44)}
+    kwargs = {
+        "root": tmp_path / "daily", "day": "2026-11-02", "db_path": tmp_path / "test.db",
+        "fetch": workbooks.__getitem__,
+        "complete": lambda _: {"selected": [
+            {"candidate_id": candidate, "selection_reason": "Clear product listing"}
+            for candidate in ("shopee:11:22", "shopee:33:44")
+        ]},
+    }
+    initial = run_daily(**kwargs)
+    intake = Path(initial["run_dir"]) / "intake.json"
+    state = json.loads(intake.read_text(encoding="utf-8"))
+    state["rows"][0]["status"] = "completed"
+    intake.write_text(json.dumps(state), encoding="utf-8")
+
+    calls = []
+    def publish(run, inbox, *, eligible_only, row_id):
+        calls.append((run, eligible_only, row_id))
+        return inbox / "2026-11-02" / row_id
+
+    monkeypatch.setattr(sheet_daily, "publish", publish)
+    result = run_daily(**kwargs, inbox_root=tmp_path / "inbox")
+    assert result["status"] == "waiting"
+    assert result["pending_items"] == [state["rows"][1]["name"]]
+    assert [item["row_id"] for item in result["exchange_batches"]] == [state["rows"][0]["row_id"]]
+    assert calls == [(intake.parent, True, state["rows"][0]["row_id"])]
+
+
+def test_max_daily_limit_can_extend_an_earlier_small_selection(tmp_path):
+    workbooks = {SHEETS[0]: _workbook(11, 22), SHEETS[1]: _workbook(33, 44)}
+    candidates_seen = []
+
+    def complete(messages):
+        candidates = [row["candidate_id"] for row in json.loads(messages[1]["content"])]
+        candidates_seen.append(candidates)
+        return {"selected": [{"candidate_id": candidates[0], "selection_reason": "Visible product"}]}
+
+    options = dict(root=tmp_path / "daily", day="2026-11-02", db_path=tmp_path / "pi.db",
+                   fetch=workbooks.__getitem__, complete=complete, inbox_root=tmp_path / "inbox")
+    first = run_daily(**options, limit=1)
+    expanded = run_daily(**options, limit=20)
+    assert expanded["selected_count"] == 2
+    assert expanded["batch_id"] == first["batch_id"]
+    assert len(expanded["run_dirs"]) == 2
+    assert run_daily(**options, limit=20) == expanded
+    assert len(candidates_seen) == 2 and len(candidates_seen[1]) == 1
+
+
 
 def test_scheduled_browser_failure_records_skip_without_retry(tmp_path, monkeypatch):
     from playwright.sync_api import Error

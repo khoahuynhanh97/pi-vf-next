@@ -11,6 +11,8 @@ from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import Any, Literal
 
+from PIL import Image
+
 from video_factory.job_contracts import TerminalJobError
 from .ports import (
     EndKeyframeInput,
@@ -68,15 +70,18 @@ def _validate_keyframe_receipt(
     keyframe: dict[str, Any],
     receipt: dict[str, Any],
     package_digest: str,
+    qc_level: str,
 ) -> None:
-    if receipt.get("stage") != "keyframe" or receipt.get("verdict") != "pass":
+    verdict = receipt.get("verdict")
+    ungraded_low_qc = qc_level == "low" and verdict in {"unknown", "not_performed"}
+    if receipt.get("stage") != "keyframe" or (verdict != "pass" and not ungraded_low_qc):
         raise ValueError("generated keyframe requires a Keyframe QC PASS receipt")
-    if bool(receipt.get("hard_failure")):
+    findings = receipt.get("findings") if isinstance(receipt.get("findings"), dict) else {}
+    if receipt.get("hard_failure") or findings.get("hard_failure"):
         raise ValueError("generated keyframe QC receipt contains a hard failure")
-    if str(receipt.get("artifact_digest") or "") != package_digest:
+    if not package_digest or str(receipt.get("artifact_digest") or "") != package_digest:
         raise ValueError("keyframe QC artifact digest does not match the approved package digest")
 
-    findings = receipt.get("findings") if isinstance(receipt.get("findings"), dict) else {}
     items = findings.get("items") if isinstance(findings.get("items"), list) else []
     frame_id = str(keyframe.get("frame_id") or "")
     item = next(
@@ -87,6 +92,15 @@ def _validate_keyframe_receipt(
         ),
         None,
     )
+    if ungraded_low_qc:
+        if item and (item.get("verdict") == "fail" or item.get("hard_failure")):
+            raise ValueError(f"keyframe {frame_id!r} failed QC")
+        try:
+            with Image.open(Path(str(keyframe.get("image_path") or ""))) as image:
+                image.load()
+        except (OSError, ValueError, Image.DecompressionBombError) as exc:
+            raise ValueError(f"cannot decode generated keyframe {frame_id!r}") from exc
+        return
     if item is None:
         raise ValueError(f"keyframe QC receipt has no binding for frame {frame_id!r}")
     if (
@@ -135,6 +149,7 @@ def compile_grounded_scene_request(
     aspect_ratio: str = "9:16",
     provider_options: dict[str, Any] | None = None,
     scene_prompt: dict[str, Any] | None = None,
+    qc_level: str = "middle",
 ) -> VideoGenerationRequest:
     """Compile one approved scene without leaking overlay copy to the video model."""
     scene_id = str(scene.get("scene_id") or "").strip()
@@ -178,6 +193,7 @@ def compile_grounded_scene_request(
         keyframe=keyframe,
         receipt=keyframe_qc_receipt,
         package_digest=package_digest,
+        qc_level=qc_level,
     )
     keyframe_path = Path(str(keyframe.get("image_path") or "")).resolve()
     expected_sha = str(keyframe.get("sha256") or "").removeprefix("sha256:")
@@ -203,6 +219,7 @@ def compile_grounded_scene_request(
             keyframe=end_keyframe,
             receipt=keyframe_qc_receipt,
             package_digest=package_digest,
+            qc_level=qc_level,
         )
         end_path = Path(str(end_keyframe.get("image_path") or "")).resolve()
         end_sha = str(end_keyframe.get("sha256") or "").removeprefix("sha256:")
@@ -1047,6 +1064,8 @@ class SceneRenderOperationStore:
         self,
         operation_id: str,
         result: VideoGenerationResult,
+        *,
+        capacity: ProviderCapacityStore | None = None,
     ) -> dict[str, Any]:
         """Validate a provider result and CAS the durable operation state.
         
@@ -1081,9 +1100,11 @@ class SceneRenderOperationStore:
         expected_aspect = str(existing.get("expected_aspect_ratio") or "")
         
         # 1. Reject missing validation contract
+        terminal = result.status in {"completed", "failed", "cancelled", "canceled"}
+        local_capacity = capacity if capacity is not None and capacity.connection is self.connection else None
         if expected_duration <= 0 or not expected_aspect:
             with self.connection:
-                self.connection.execute(
+                updated = self.connection.execute(
                     """
                     UPDATE video_factory_scene_operation
                     SET status = 'failed',
@@ -1095,6 +1116,8 @@ class SceneRenderOperationStore:
                     """,
                     (operation_id,),
                 )
+                if updated.rowcount and terminal and local_capacity:
+                    local_capacity.release_terminal_in_transaction(existing["provider_kind"], operation_id)
             return dict(self.get(operation_id) or existing)
         
         final_status = result.status
@@ -1140,7 +1163,7 @@ class SceneRenderOperationStore:
                         output_sha = ""
         
         with self.connection:
-            self.connection.execute(
+            updated = self.connection.execute(
                 """
                 UPDATE video_factory_scene_operation
                 SET status = ?,
@@ -1164,6 +1187,8 @@ class SceneRenderOperationStore:
                     operation_id,
                 ),
             )
+            if updated.rowcount and terminal and local_capacity:
+                local_capacity.release_terminal_in_transaction(existing["provider_kind"], operation_id)
         
         return dict(self.get(operation_id) or existing)
 
@@ -1194,7 +1219,8 @@ class SceneRenderOperationStore:
         return dict(self.get(operation_id) or existing)
 
     def save_result(
-        self, request: VideoGenerationRequest, result: VideoGenerationResult
+        self, request: VideoGenerationRequest, result: VideoGenerationResult,
+        *, capacity: ProviderCapacityStore | None = None,
     ) -> None:
         """Atomically persist provider response, enforcing monotonic state transitions."""
         digest = stable_scene_request_digest(request)
@@ -1204,7 +1230,7 @@ class SceneRenderOperationStore:
                 raise ValueError("video scene operation idempotency conflict")
         else:
             self.mark_planned(request)
-        self.finalize_provider_result(request.request_id, result)
+        self.finalize_provider_result(request.request_id, result, capacity=capacity)
 
     def quarantine_inactive_submission(
         self, operation_id: str, *, evidence: str, confirmed_inactive: bool
@@ -1469,9 +1495,10 @@ class SceneRenderRuntime:
                 selected.kind, request.request_id, reconciled.provider_operation_id
             )
         final_state = self.store.finalize_provider_result(
-            request.request_id, reconciled
+            request.request_id, reconciled, capacity=self.capacity_store,
         )
-        if self.capacity_store and final_state.get("status") in {"completed", "failed"}:
+        if (self.capacity_store and self.capacity_store.connection is not self.store.connection
+                and reconciled.status in {"completed", "failed", "cancelled", "canceled"}):
             self.capacity_store.release_terminal(selected.kind, request.request_id)
         if final_state.get("status") == "failed":
             return replace(
@@ -1525,36 +1552,12 @@ class SceneRenderRuntime:
             if provider_operation_id:
                 if not self._admit_capacity(request, selected, reconciled_takeover=True):
                     return self._capacity_wait(request)
-                submitted_at = existing.get("submitted_at")
-                if submitted_at and existing["status"] in ("submitted", "running"):
-                    try:
-                        from datetime import datetime, timezone, timedelta
-                        submitted = datetime.fromisoformat(submitted_at.replace("Z", "+00:00"))
-                        if submitted.tzinfo is None:
-                            submitted = submitted.replace(tzinfo=timezone.utc)
-                        elapsed = datetime.now(timezone.utc) - submitted
-                        timeout_minutes = 5
-                        if elapsed > timedelta(minutes=timeout_minutes):
-                            timeout_result = VideoGenerationResult(
-                                request_id=request.request_id,
-                                status="failed",
-                                error_code="SCENE_TIMEOUT_EXPIRED",
-                                error_message=f"Scene operation exceeded {timeout_minutes} minute timeout (elapsed: {int(elapsed.total_seconds())}s)",
-                            )
-                            self.store.save_result(request, timeout_result)
-                            if self.capacity_store:
-                                self.capacity_store.release_terminal(selected.kind, request.request_id)
-                            return timeout_result
-                    except (ValueError, TypeError):
-                        pass
                 result = selected.provider.get_status(provider_operation_id)
                 result = replace(result, request_id=request.request_id)
                 result = self._with_provider_kind(result, selected.kind)
                 if (result.status == "failed" and result.error_code == "RECONCILIATION_REQUIRED") or result.status == "unknown":
                     return result
-                self.store.save_result(request, result)
-                if self.capacity_store and result.status in {"completed", "failed"}:
-                    self.capacity_store.release_terminal(selected.kind, request.request_id)
+                self._save_result(request, result, selected.kind)
                 return result
             if existing["status"] == "submitting":
                 reconciled = self._reconcile_submitting(request, selected)
@@ -1641,15 +1644,19 @@ class SceneRenderRuntime:
                     )
             return result
 
-        self.store.save_result(request, result)
-        if self.capacity_store:
-            if result.provider_operation_id:
-                self.capacity_store.bind_provider_operation(
-                    selected.kind, request.request_id, result.provider_operation_id,
-                )
-            if result.status in {"completed", "failed"}:
-                self.capacity_store.release_terminal(selected.kind, request.request_id)
+        self._save_result(request, result, selected.kind)
         return result
+
+    def _save_result(self, request, result, provider_kind):
+        terminal = result.status in {"completed", "failed", "cancelled", "canceled"}
+        self.store.save_result(request, result, capacity=self.capacity_store)
+        if self.capacity_store is None:
+            return
+        if terminal:
+            if self.capacity_store.connection is not self.store.connection:
+                self.capacity_store.release_terminal(provider_kind, request.request_id)
+        elif result.provider_operation_id:
+            self.capacity_store.bind_provider_operation(provider_kind, request.request_id, result.provider_operation_id)
 
     def _admit_capacity(
         self,

@@ -24,6 +24,7 @@ from .capacity import ProviderCapacityStore
 
 DEFAULT_MODEL = "gemini-2.5-flash-image"
 DEFAULT_LOCATION = "us-east4"
+MAX_OUTPUT_RECONCILIATION_ATTEMPTS = 3
 SUPPORTED_ASPECT_RATIOS = frozenset({"1:1", "3:4", "4:3", "9:16", "16:9"})
 
 
@@ -310,7 +311,7 @@ class KeyframeOperationStore:
         return dict(row) if row else None
 
     def claim_output_reconciliation(
-        self, operation_id: str, provider_operation_id: str, *, max_attempts: int = 3,
+        self, operation_id: str, provider_operation_id: str, *, max_attempts: int = MAX_OUTPUT_RECONCILIATION_ATTEMPTS,
     ) -> int | None:
         """Persist a bounded read/download attempt without changing generation state."""
         self.connection.execute("BEGIN IMMEDIATE")
@@ -441,11 +442,16 @@ class KeyframeOperationStore:
         self,
         request: KeyframeGenerationRequest,
         result: KeyframeGenerationResult,
+        *,
+        capacity: ProviderCapacityStore | None = None,
     ) -> None:
         digest = _stable_request_digest(request)
         existing = self.get(request.operation_id)
         if existing and existing["request_digest"] != digest:
             raise ValueError("keyframe operation idempotency conflict")
+        if existing and result.status == "unknown" and result.error_code == "OUTPUT_RECONCILIATION_EXHAUSTED":
+            # No poll ran. Preserve the last settled outcome for operator recovery.
+            return
         existing_kind = str((existing or {}).get("provider_kind") or "").strip()
         result_kind = str((result.metadata or {}).get("provider_kind") or "").strip()
         if existing_kind and result_kind and existing_kind != result_kind:
@@ -503,6 +509,10 @@ class KeyframeOperationStore:
                     result.error_message,
                 ),
             )
+            if capacity is not None and capacity.connection is self.connection:
+                capacity.release_terminal_in_transaction(provider_kind, request.operation_id)
+        if capacity is not None and capacity.connection is not self.connection:
+            capacity.release_terminal(provider_kind, request.operation_id)
 
 
 class KeyframeRuntime:
@@ -549,6 +559,11 @@ class KeyframeRuntime:
                         image_path=str(path),
                     )
             provider_operation_id = existing["provider_operation_id"]
+            if existing["status"] == "abandoned_unknown":
+                return KeyframeGenerationResult(
+                    request.operation_id, "failed", provider_operation_id=provider_operation_id,
+                    error_code=existing["error_code"], error_message=existing["error_message"],
+                )
             if existing["status"] == "failed":
                 if str(existing.get("error_code") or "").upper() not in {
                     "HTTP_429", "HTTP_500", "HTTP_502", "HTTP_503", "HTTP_504",
@@ -562,29 +577,6 @@ class KeyframeRuntime:
                         error_message=existing["error_message"],
                     )
             if provider_operation_id:
-                submitted_at = existing.get("submitted_at")
-                if submitted_at and existing["status"] in ("submitting", "project_created", "unknown"):
-                    try:
-                        from datetime import datetime, timezone, timedelta
-                        submitted = datetime.fromisoformat(submitted_at.replace("Z", "+00:00"))
-                        if submitted.tzinfo is None:
-                            submitted = submitted.replace(tzinfo=timezone.utc)
-                        elapsed = datetime.now(timezone.utc) - submitted
-                        timeout_minutes = 5
-                        if elapsed > timedelta(minutes=timeout_minutes):
-                            timeout_result = KeyframeGenerationResult(
-                                operation_id=request.operation_id,
-                                status="failed",
-                                provider_operation_id=provider_operation_id,
-                                error_code="KEYFRAME_TIMEOUT_EXPIRED",
-                                error_message=f"Keyframe operation exceeded {timeout_minutes} minute timeout (elapsed: {int(elapsed.total_seconds())}s)",
-                            )
-                            self.store.save_result(request, timeout_result)
-                            if self.capacity_store:
-                                self.capacity_store.release_terminal(self.provider_kind, request.operation_id)
-                            return timeout_result
-                    except (ValueError, TypeError):
-                        pass
                 if self.capacity_store and not self.capacity_store.try_acquire(
                     provider_kind=self.provider_kind,
                     operation_id=request.operation_id,
@@ -613,9 +605,7 @@ class KeyframeRuntime:
                         error_code=result.error_code,
                         error_message=result.error_message,
                     )
-                self.store.save_result(request, result)
-                if self.capacity_store and result.status in {"completed", "failed"}:
-                    self.capacity_store.release_terminal(self.provider_kind, request.operation_id)
+                self._save_result(request, result)
                 return result
             return KeyframeGenerationResult(
                 request.operation_id,
@@ -627,18 +617,17 @@ class KeyframeRuntime:
         try:
             result = self.provider.submit(request)
         except Exception as exc:
-            if self.capacity_store:
-                self.capacity_store.release_terminal(self.provider_kind, request.operation_id)
             return KeyframeGenerationResult(
                 request.operation_id, "unknown", error_code="RECONCILIATION_REQUIRED",
                 error_message=str(exc),
             )
-        self.store.save_result(request, result)
-        if self.capacity_store:
-            if result.provider_operation_id:
-                self.capacity_store.bind_provider_operation(
-                    self.provider_kind, request.operation_id, result.provider_operation_id,
-                )
-            if result.status in {"completed", "failed"} or (result.status == "unknown" and not result.provider_operation_id):
-                self.capacity_store.release_terminal(self.provider_kind, request.operation_id)
+        self._save_result(request, result)
         return result
+
+    def _save_result(self, request, result):
+        terminal = result.status in {"completed", "failed"} and result.error_code != "RECONCILIATION_REQUIRED"
+        self.store.save_result(request, result, capacity=self.capacity_store if terminal else None)
+        if not terminal and self.capacity_store and result.provider_operation_id:
+            self.capacity_store.bind_provider_operation(
+                self.provider_kind, request.operation_id, result.provider_operation_id,
+            )

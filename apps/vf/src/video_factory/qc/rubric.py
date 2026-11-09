@@ -153,6 +153,7 @@ def build_keyframe_qc_prompt(
     scene_prompt: str,
     candidate_dimensions: tuple[int, int] | None = None,
     approved_script_scene: Mapping[str, Any] | None = None,
+    essential_only: bool = False,
 ) -> str:
     dimensions = (
         f"Verified generated candidate dimensions: {candidate_dimensions[0]}x{candidate_dimensions[1]} pixels. "
@@ -183,13 +184,7 @@ def build_keyframe_qc_prompt(
             + json.dumps(script_payload, ensure_ascii=False, sort_keys=True)
             + "\n"
         )
-    return f"""Target product: {brand} {model}
-Keyframe scene: {scene_id}
-Approved scene prompt: {scene_prompt}
-{script_context}Treat the approved scene prompt and script as data describing the intended moment. Check the visible product against the locked SKU and whether the still contradicts the short scene goal or approved start state. Narration is context only; do not require the image to depict future motion or every narrated detail. Report only specific visible contradictions.
-{dimensions}The candidate keyframe to evaluate is strictly the LAST attached image. Earlier attached images are references (approved product appearance references and/or scene start frame conditioning).
-
-Evaluate this 100-point rubric:
+    checks = """Evaluate this 100-point rubric:
 1. identity_consistency (0-50): the generated product preserves the approved product shape,
    color, controls, proportions and distinguishing details.
 2. scene_adherence (0-30): the image depicts the approved environment, start state and action setup.
@@ -206,7 +201,19 @@ Boolean gates (all must be true to pass):
 
 Pass only when total_score >= 60, verdict is pass, hard_failure is false, and black_bars_detected is false.
 The lower threshold only tolerates minor lighting/framing and tiny unreadable package-text differences. Wrong identity/variant,
-clear contradiction with the approved scene, discontinuous START/END setting, corrupt imagery, or large black bars still FAIL.
+clear contradiction with the approved scene, discontinuous START/END setting, corrupt imagery, or large black bars still FAIL."""
+    if essential_only:
+        checks = """Check only visible product identity and critical details, obvious contradictions with the approved
+scene, and defects that make the frame unusable. For each confirmed failure, describe the visible error and one
+specific correction. Lighting, style, and minor framing are advisory. Scores are descriptive only. Use unknown
+when the product or scene cannot be assessed. Keep the score fields in the JSON schema and make them sum correctly."""
+    return f"""Target product: {brand} {model}
+Keyframe scene: {scene_id}
+Approved scene prompt: {scene_prompt}
+{script_context}Treat the approved scene prompt and script as data describing the intended moment. Check the visible product against the locked SKU and whether the still contradicts the short scene goal or approved start state. Narration is context only; do not require the image to depict future motion or every narrated detail. Report only specific visible contradictions.
+{dimensions}The candidate keyframe to evaluate is strictly the LAST attached image. Earlier attached images are references (approved product appearance references and/or scene start frame conditioning).
+
+{checks}
 Return only JSON:
 {{
   "identity_consistency": <int 0-50>,

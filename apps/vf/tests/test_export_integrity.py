@@ -237,7 +237,10 @@ def test_server_export_uses_canonical_immutable_package(tmp_path: Path, monkeypa
     assert metadata["provenance"]["spend"] == {"actual_cost_status": "unavailable"}
 
 
-def test_four_agent_technical_qc_without_final_critic_exports_exact_mp4(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize("low", [False, True])
+def test_four_agent_technical_qc_without_final_critic_exports_exact_mp4(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, low: bool,
+) -> None:
     import hashlib
     from dataclasses import asdict
     from video_factory.qc.models import QCReport, QCStage, QCVerdict
@@ -289,8 +292,10 @@ def test_four_agent_technical_qc_without_final_critic_exports_exact_mp4(tmp_path
         artifact_id=artifact_id, owner_user_id="owner", workflow_id=workflow_id,
         project_id="proj-technical-final", kind="composite",
         relative_path=video.relative_to(workspace).as_posix(), sha256=sha,
-        version=1, size=video.stat().st_size, mime_type="video/mp4", status="active"))
-    QCReportRepository(__import__("sqlite3").connect(db_path)).save_report(QCReport(
+        version=1, size=video.stat().st_size, mime_type="video/mp4", status="active",
+        provider_metadata={"provenance": {"qc_level": "low"}} if low else {}))
+    if not low:
+        QCReportRepository(__import__("sqlite3").connect(db_path)).save_report(QCReport(
         report_id="qc-technical-final", workflow_id=workflow_id, stage=QCStage.VIDEO,
         artifact_id=artifact_id, artifact_version=1, artifact_digest=f"sha256:{sha}",
         reference_digests=[], evaluator_name="technical_probe", evaluator_version="1",
@@ -298,7 +303,7 @@ def test_four_agent_technical_qc_without_final_critic_exports_exact_mp4(tmp_path
         verdict=QCVerdict.PASS, findings={"technical_only_final":True,
             "content_review":"not_performed", "technical_specs":{"technical_pass":True}},
         sample_timestamps=[], fingerprint="technical-only", provider_mode="configured",
-        policy_version=VIDEO_POLICY_VERSION, owner_user_id="owner", project_id="proj-technical-final"))
+            policy_version=VIDEO_POLICY_VERSION, owner_user_id="owner", project_id="proj-technical-final"))
 
     result = server.export(render_result={"creative_mode":"four_agent", "file_path":str(video),
         "owner_user_id":"owner", "project_id":"proj-technical-final", "workflow_id":workflow_id,

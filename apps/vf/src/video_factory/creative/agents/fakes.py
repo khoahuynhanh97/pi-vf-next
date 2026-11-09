@@ -106,6 +106,9 @@ class FakeRoles:
             raw_assets = [a["asset_id"] for a in dossier.get("eligible_assets", [])]
             asset_ids = raw_assets[:1] if raw_assets else ["asset_01"]
 
+            include_bible = "scene_bible" in kwargs.get("user_prompt", "") or "SCENE BIBLE" in kwargs.get("user_prompt", "")
+            bible_env = "daylit studio"
+            bible_light = "soft daylight"
             for index, action in enumerate(actions):
                 role = role_pool[index] if index < len(role_pool) else "demo"
                 if index == len(actions) - 1:
@@ -118,20 +121,20 @@ class FakeRoles:
                     "narration": "",
                     "overlay_text": "",
                     "visual_objective": action,
-                    "environment": "daylit desk" if index < 2 else "daylit studio",
+                    "environment": bible_env if include_bible else ("daylit desk" if index < 2 else "daylit studio"),
                     "subject_action": action,
                     "product_interaction": "The same hand handles the documented item",
                     "start_state": "The item is visible before this action",
                     "end_state": "The item stays visible after this action",
                     "visual_change": action,
-                    "camera_framing": "medium closeup",
+                    "camera_framing": ("close-up" if index == 0 else "medium closeup") if include_bible else "medium closeup",
                     "camera_movement": "locked camera",
                     "transition_out": "cut",
                     "claim_refs": [claim_id],
                     "reference_asset_ids": asset_ids,
                     "product_identity_cues": ["same documented shape"],
                     "product_placement": "center in portrait",
-                    "lighting": "soft daylight",
+                    "lighting": bible_light if include_bible else "soft daylight",
                     "continuity_from_previous": "same item and hand",
                     "continuity_to_next": "same item and hand",
                     "required_visible_details": ["same shape"],
@@ -146,6 +149,13 @@ class FakeRoles:
                 "target_duration_seconds": total_duration,
                 "scenes": scenes,
             }
+            if include_bible:
+                data["scene_bible"] = {
+                    "environment": bible_env,
+                    "lighting": bible_light,
+                    "pov_hand": "relaxed right hand holding item",
+                    "camera_baseline": "eye-level 45-degree angle",
+                }
             return StructuredModelResult(data, json.dumps(data), "fake", "fake-director")
 
         elif name == "scene-prompt-bundle-v1":
@@ -178,8 +188,13 @@ class FakeRoles:
                 },
             }
             if "preproduction_threshold" in context:
-                from .critic import PREPRODUCTION_WEIGHTS
-                data.update(scores=dict(PREPRODUCTION_WEIGHTS), hard_failures=[])
+                if context.get("rubric_version") == "v2":
+                    from .critic import PREPRODUCTION_WEIGHTS_V2
+                    scene_pov = [{"scene_id": s_id, "kind": "experiential"} for s_id in context.get("scene_ids", [])]
+                    data.update(scores=dict(PREPRODUCTION_WEIGHTS_V2), hard_failures=[], scene_pov=scene_pov)
+                else:
+                    from .critic import PREPRODUCTION_WEIGHTS
+                    data.update(scores=dict(PREPRODUCTION_WEIGHTS), hard_failures=[])
             return StructuredModelResult(data, json.dumps(data), "fake", "fake-critic")
 
         elif name == "prompt-repair-v1":

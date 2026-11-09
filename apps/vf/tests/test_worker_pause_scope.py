@@ -46,6 +46,8 @@ def test_capacity_pause_keeps_active_operations_dispatchable_for_unfiltered_and_
     assert worker._should_pause_worker(pause, ["wf-A", "wf-B"], connection=conn) is False
     assert worker._capacity_dispatch_scope(conn, None, None) == ["wf-A"]
     assert worker._capacity_dispatch_scope(conn, ["wf-A", "wf-B"], None) == ["wf-A"]
+    WorkflowRepository(conn).commit_workflow("wf-C", '{"state":"exporting"}', [], expected_version=0)
+    assert worker._capacity_dispatch_scope(conn, ["wf-B", "wf-C"], None) == ["wf-C"]
     conn.close()
 
 

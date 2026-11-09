@@ -5,7 +5,9 @@ import pytest
 from video_factory.creative.agents.contracts import (
     BackendProfile, CreativeReview, ReviewFinding, ScenePrompt, ScenePromptBundle,
 )
-from video_factory.creative.contracts import canonical_digest
+from video_factory.creative.contracts import (
+    canonical_digest, SceneBible, ScriptScenePlanV2, ScriptSceneV2,
+)
 
 
 def profile():
@@ -75,3 +77,128 @@ def test_creative_review_from_dict_tolerates_missing_finding_id():
     assert len(rev.findings) == 1
     assert rev.findings[0].finding_id.startswith('finding-scene_2_detail-framing_defect')
     assert rev.findings[0].blocking is True
+
+
+def test_scene_bible_validation():
+    bible = SceneBible(
+        environment="clean desk setup",
+        lighting="soft diffused daylight",
+        pov_hand="right hand with neutral grip",
+        camera_baseline="45 degree high angle steady",
+    )
+    assert bible.environment == "clean desk setup"
+    assert bible.to_dict()["environment"] == "clean desk setup"
+    assert SceneBible.from_dict(bible.to_dict()) == bible
+
+    for field_name in ("environment", "lighting", "pov_hand", "camera_baseline"):
+        invalid_kwargs = {
+            "environment": "clean desk",
+            "lighting": "soft light",
+            "pov_hand": "neutral hand",
+            "camera_baseline": "steady shot",
+        }
+        invalid_kwargs[field_name] = ""
+        with pytest.raises(ValueError, match=field_name):
+            SceneBible(**invalid_kwargs)
+
+    # Malformed types and unknown keys in from_dict
+    valid_bible_dict = {
+        "environment": "clean desk",
+        "lighting": "soft light",
+        "pov_hand": "neutral hand",
+        "camera_baseline": "steady shot",
+    }
+    with pytest.raises(ValueError, match="exactly the keys"):
+        SceneBible.from_dict({**valid_bible_dict, "extra_key": "unexpected"})
+    with pytest.raises(ValueError):
+        SceneBible.from_dict({**valid_bible_dict, "environment": 123})
+    with pytest.raises(ValueError):
+        SceneBible.from_dict({**valid_bible_dict, "lighting": {"type": "sunlight"}})
+    with pytest.raises(ValueError):
+        SceneBible.from_dict("not a dict")
+
+
+def test_scene_bible_script_digest_roundtrip_and_legacy_compatibility():
+    from test_creative_handler_wiring import _brief, _dossier
+
+    brief = _brief(_dossier())
+    scene = ScriptSceneV2(
+        scene_id="s1",
+        order=1,
+        story_role="hook",
+        duration_seconds=6,
+        narration="",
+        overlay_text="",
+        visual_objective="Present product",
+        environment="studio setting",
+        subject_action="Hand places product on desk",
+        product_interaction="Hold product gently",
+        start_state="Product resting on table",
+        end_state="Product held in hand",
+        visual_change="Product is lifted",
+        camera_framing="medium close-up",
+        camera_movement="static",
+        transition_out="cut",
+        product_placement="center",
+        lighting="soft daylight",
+        continuity_from_previous="start",
+        continuity_to_next="end",
+        product_identity_cues=("logo",),
+        required_visible_details=("finish",),
+        reference_requirements=("photo",),
+        reference_asset_ids=("asset_1",),
+        claim_refs=("claim_1",),
+        end_keyframe_policy="omitted",
+        end_keyframe_omission_reason="continuous motion",
+    )
+
+    # Legacy plan without scene_bible
+    legacy_plan = ScriptScenePlanV2.create(
+        target_duration_seconds=6,
+        brief_digest=brief.digest(),
+        scenes=(scene,),
+    )
+    assert legacy_plan.scene_bible is None
+    legacy_dict = legacy_plan.to_dict()
+    assert "scene_bible" not in legacy_dict
+    roundtrip_legacy = ScriptScenePlanV2.from_dict(legacy_dict)
+    assert roundtrip_legacy.digest() == legacy_plan.digest()
+    assert roundtrip_legacy.scene_bible is None
+
+    # New plan with scene_bible
+    bible = SceneBible(
+        environment="studio setting",
+        lighting="soft daylight",
+        pov_hand="right hand with neutral grip",
+        camera_baseline="45 degree steady",
+    )
+    new_plan = ScriptScenePlanV2.create(
+        target_duration_seconds=6,
+        brief_digest=brief.digest(),
+        scenes=(scene,),
+        scene_bible=bible,
+    )
+    assert new_plan.scene_bible == bible
+    new_dict = new_plan.to_dict()
+    assert "scene_bible" in new_dict
+    assert new_dict["scene_bible"] == bible.to_dict()
+    assert new_plan.digest() != legacy_plan.digest()
+    roundtrip_new = ScriptScenePlanV2.from_dict(new_dict)
+    assert roundtrip_new.digest() == new_plan.digest()
+    assert roundtrip_new.scene_bible == bible
+
+    # Non-object scene_bible in from_dict rejected
+    invalid_plan_dict = dict(legacy_dict)
+    invalid_plan_dict["scene_bible"] = "not an object"
+    with pytest.raises(ValueError, match="scene_bible"):
+        ScriptScenePlanV2.from_dict(invalid_plan_dict)
+
+    # Environment/lighting mismatch at plan canonical boundary rejected
+    mismatched_scene = replace(scene, environment="completely different environment")
+    with pytest.raises(ValueError, match="does not match scene_bible"):
+        ScriptScenePlanV2.create(
+            target_duration_seconds=6,
+            brief_digest=brief.digest(),
+            scenes=(mismatched_scene,),
+            scene_bible=bible,
+        )

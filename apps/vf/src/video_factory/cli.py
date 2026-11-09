@@ -2359,6 +2359,7 @@ def cmd_recover_keyframe(args: argparse.Namespace) -> int:
             owner_user_id=args.owner_user_id,
             authorization=None,
             operation_id=args.operation_id,
+            replacement_note=args.replace_unretrievable_output,
         )
         print(json.dumps(result, ensure_ascii=False))
         return 0
@@ -3019,6 +3020,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_recover.add_argument("workflow_id", help="Workflow ID (positional)")
     p_recover.add_argument("--operation-id", required=True, help="Targeted keyframe operation ID to replace")
+    p_recover.add_argument("--replace-unretrievable-output", metavar="NOTE",
+                           help="Authorize one replacement after the Flow output lookup budget is exhausted")
     p_recover.add_argument("--owner-user-id", default="local-owner")
     p_recover.add_argument("--authorization-run-id", default=None)
     p_recover.add_argument("--authorization-scope", action="append", default=[])

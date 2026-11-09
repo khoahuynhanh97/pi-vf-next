@@ -104,6 +104,8 @@ def test_capacity_rejects_invalid_limit(tmp_path: Path) -> None:
 
 
 def test_scene_poll_reuses_process_capacity_and_keeps_ambiguous_operation(tmp_path: Path) -> None:
+    from datetime import datetime, timedelta, timezone
+
     class Provider:
         provider_kind = "google_flow"
         profile_id = "flow-profile"
@@ -134,11 +136,83 @@ def test_scene_poll_reuses_process_capacity_and_keeps_ambiguous_operation(tmp_pa
     )
     first = SceneRenderRuntime(store=store, provider=Provider(), capacity_store=capacity)
     assert first.run(request).status == "submitted"
+    with connection:
+        connection.execute("UPDATE video_factory_scene_operation SET submitted_at=? WHERE operation_id=?",
+                           ((datetime.now(timezone.utc) - timedelta(minutes=20)).isoformat(), request.request_id))
     second = SceneRenderRuntime(store=store, provider=Provider(), capacity_store=capacity)
     result = second.run(request)
     assert result.error_code == "RECONCILIATION_REQUIRED"
     assert store.get(request.request_id)["status"] == "submitted"
     assert len(capacity.active("google_flow")) == 1
+    connection.close()
+
+
+def test_admission_recovers_only_bound_completed_slots_after_restart(tmp_path):
+    path = tmp_path / "terminal-capacity.db"
+    connection = sqlite3.connect(path)
+    capacity = ProviderCapacityStore(connection)
+    assert capacity.try_acquire(provider_kind="google_flow", operation_id="old",
+                                lease_owner="worker", limit=1)
+    capacity.bind_provider_operation("google_flow", "old", "flow-old")
+    with connection:
+        connection.execute(
+            "CREATE TABLE video_factory_keyframe_operation "
+            "(operation_id TEXT, provider_kind TEXT, provider_operation_id TEXT, status TEXT, error_code TEXT)"
+        )
+        connection.execute("INSERT INTO video_factory_keyframe_operation VALUES "
+                           "('old', 'vertex_keyframe', 'flow-old', 'completed', '')")
+    connection.close()
+    connection = sqlite3.connect(path)
+    capacity = ProviderCapacityStore(connection)
+    kwargs = dict(provider_kind="google_flow", operation_id="next", lease_owner="worker", limit=1)
+    assert not capacity.try_acquire(**kwargs)
+    with connection:
+        connection.execute("UPDATE video_factory_keyframe_operation SET provider_kind='google_flow', "
+                           "status='failed', error_code='KEYFRAME_TIMEOUT_EXPIRED'")
+    assert not capacity.try_acquire(**kwargs)
+    with connection:
+        connection.execute("UPDATE video_factory_keyframe_operation SET status='completed', error_code=''")
+    assert capacity.try_acquire(**kwargs)
+    assert [slot["operation_id"] for slot in capacity.active("google_flow")] == ["next"]
+    connection.close()
+
+
+@pytest.mark.parametrize("kind", ["keyframe", "scene"])
+def test_terminal_persistence_and_slot_release_roll_back_together(tmp_path, monkeypatch, kind):
+    from video_factory.integrations.keyframe_provider import (
+        KeyframeGenerationRequest, KeyframeGenerationResult, KeyframeOperationStore,
+    )
+
+    connection = sqlite3.connect(tmp_path / f"{kind}.sqlite")
+    capacity = ProviderCapacityStore(connection)
+    assert capacity.try_acquire(provider_kind="google_flow", operation_id="op",
+                                lease_owner="worker", limit=1)
+    if kind == "keyframe":
+        store = KeyframeOperationStore(connection)
+        request = KeyframeGenerationRequest(operation_id="op", workflow_id="wf", project_id="project",
+                                            frame_id="frame", prompt="test", product_description="test",
+                                            reference_image_paths=())
+        store.claim_first_submission(request, "google_flow")
+        result = KeyframeGenerationResult("op", "failed", error_code="PROVIDER_DENIED")
+    else:
+        store = SceneRenderOperationStore(connection)
+        request = VideoGenerationRequest("op", "owner", "project", "scene", "test", 4)
+        store.mark_planned(request)
+        store.claim_provider_for_submission(request, "google_flow")
+        result = VideoGenerationResult("op", "failed", error_code="PROVIDER_DENIED")
+
+    def fail_release(*args):
+        raise sqlite3.OperationalError("simulated release failure")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(capacity, "release_terminal_in_transaction", fail_release)
+        with pytest.raises(sqlite3.OperationalError, match="simulated release failure"):
+            store.save_result(request, result, capacity=capacity)
+    assert store.get("op")["status"] == "submitting"
+    assert len(capacity.active("google_flow")) == 1
+    store.save_result(request, result, capacity=capacity)
+    assert store.get("op")["status"] == "failed"
+    assert capacity.active("google_flow") == []
     connection.close()
 
 

@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any
 
 from automation.config import (
+    DAILY_VIDEO_LIMIT,
     DEFAULT_FOOD_PROFILE,
     DEFAULT_PROFILE,
     INBOX_ROOT,
@@ -35,6 +36,7 @@ from automation.config import (
     now_bangkok,
     today_bangkok_str,
 )
+from automation.storage import atomic_json, exclusive_file_lock
 
 
 logger = logging.getLogger(__name__)
@@ -239,6 +241,7 @@ def _inspect_run_workflows(
     exchange_batch_dir: Path | None = None,
     *,
     provider_mode: str = "fake",
+    expected_product_key: str | None = None,
     inspection_errors: list[str] | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """Inspect SQLite DB to get exact workflows, outcomes, and export receipts for this run."""
@@ -254,6 +257,20 @@ def _inspect_run_workflows(
         if inspection_errors is None:
             raise exc
         inspection_errors.append(message)
+
+    def verified_probe(path, receipt, project_id, exported):
+        if receipt.get("project_id") != project_id:
+            return None
+        probe = probe_mp4_file(path)
+        if not probe.decodable:
+            return None
+        if expected_product_key:
+            recorded = (receipt.get("video") or {}).get("sha256") or (
+                (receipt.get("files") or {}).get(path.name) or {}
+            ).get("sha256")
+            if recorded != probe.sha256 or exported.get("sha256") != probe.sha256:
+                return None
+        return probe
 
     manifest_products = {}
     if exchange_batch_dir and (exchange_batch_dir / "manifest.json").is_file():
@@ -301,6 +318,14 @@ def _inspect_run_workflows(
             p_key = source_ctx.get("product_key") or wf_agg.get("product_key")
             prod_info = manifest_products.get(p_key, {})
             name = (prod_info.get("name") if prod_info else None) or source_ctx.get("name") or (wf_agg.get("research_result") or {}).get("product_name") or ref
+            if expected_product_key and (
+                p_key != expected_product_key or source_ctx.get("source_batch_id") != selection_agg.get("batch_id")
+            ):
+                product_outcomes.append({
+                    "product_name": name, "workflow_id": ref, "status": "failed",
+                    "stage": "export_verification", "reason": "Workflow does not match the pinned PI batch and product",
+                })
+                continue
 
             if state == "completed":
                 if ref in fake_workflows:
@@ -320,23 +345,22 @@ def _inspect_run_workflows(
                 if mp4_path and mp4_path.is_file() and receipt_file and receipt_file.is_file():
                     try:
                         receipt_data = json.loads(receipt_file.read_text(encoding="utf-8"))
-                        if receipt_data.get("project_id") == proj_id:
-                            probe = probe_mp4_file(mp4_path)
-                            if probe.decodable:
-                                receipt_valid = True
-                                exported_probes.append(asdict(probe))
-                                product_outcomes.append({
-                                    "product_name": name,
-                                    "workflow_id": ref,
-                                    "status": "success",
-                                    "stage": "completed",
-                                    "file_path": str(mp4_path),
-                                    "receipt_path": str(receipt_file),
-                                    "sha256": probe.sha256,
-                                    "decodable": True,
-                                    "reason": "Successfully exported and verified decodable MP4 from current run export receipt",
-                                    "next_step": "Delivery complete",
-                                })
+                        probe = verified_probe(mp4_path, receipt_data, proj_id, raw_exp)
+                        if probe:
+                            receipt_valid = True
+                            exported_probes.append(asdict(probe))
+                            product_outcomes.append({
+                                "product_name": name,
+                                "workflow_id": ref,
+                                "status": "success",
+                                "stage": "completed",
+                                "file_path": str(mp4_path),
+                                "receipt_path": str(receipt_file),
+                                "sha256": probe.sha256,
+                                "decodable": True,
+                                "reason": "Successfully exported and verified decodable MP4 from current run export receipt",
+                                "next_step": "Delivery complete",
+                            })
                     except Exception as exc:
                         report_error(f"Export receipt for {ref}", exc)
 
@@ -393,27 +417,31 @@ def _inspect_run_workflows(
                         if mp4_path and mp4_path.is_file() and receipt_file and receipt_file.is_file():
                             try:
                                 receipt_data = json.loads(receipt_file.read_text(encoding="utf-8"))
-                                if receipt_data.get("project_id") == proj_id:
-                                    probe = probe_mp4_file(mp4_path)
-                                    if probe.decodable:
-                                        accepted_probe = asdict(probe)
-                                        accepted_outcome = {
-                                            "product_name": name,
-                                            "workflow_id": w_id,
-                                            "status": "success",
-                                            "stage": "completed",
-                                            "file_path": str(mp4_path),
-                                            "receipt_path": str(receipt_file),
-                                            "sha256": probe.sha256,
-                                            "decodable": True,
-                                            "reason": "Reused current accepted and verified decodable MP4 from export receipt",
-                                            "next_step": "Delivery complete",
-                                        }
+                                probe = verified_probe(mp4_path, receipt_data, proj_id, raw_exp)
+                                if probe and (not expected_product_key or p_key == expected_product_key):
+                                    reused_from_other_batch = bool(
+                                        expected_product_key
+                                        and source_ctx.get("source_batch_id") != selection_agg.get("batch_id")
+                                    )
+                                    accepted_probe = asdict(probe)
+                                    accepted_outcome = {
+                                        "product_name": name,
+                                        "workflow_id": w_id,
+                                        "status": "reused" if reused_from_other_batch else "success",
+                                        "stage": "completed",
+                                        "file_path": str(mp4_path),
+                                        "receipt_path": str(receipt_file),
+                                        "sha256": probe.sha256,
+                                        "decodable": True,
+                                        "reason": "Reused current accepted and verified decodable MP4 from export receipt",
+                                        "next_step": "Delivery complete",
+                                    }
                             except Exception as exc:
                                 report_error(f"Reused export receipt for {w_id}", exc)
 
                 if accepted_outcome and accepted_probe:
-                    exported_probes.append(accepted_probe)
+                    if accepted_outcome["status"] == "success":
+                        exported_probes.append(accepted_probe)
                     product_outcomes.append(accepted_outcome)
                 else:
                     product_outcomes.append({
@@ -513,6 +541,8 @@ def run_pipeline(
         effective_offline_intake = bool(offline_intake)
 
     from_sheets = spark_csv is None
+    if from_sheets and not 1 <= limit <= DAILY_VIDEO_LIMIT:
+        raise ValueError(f"Sheet limit must be between 1 and {DAILY_VIDEO_LIMIT}")
     if from_sheets and sheet_intake is None:
         sheet_intake = prepare_sheet_intake(prod_date, limit, acquire=not effective_offline_intake)
     selection_csv = (sheet_intake or {}).get("selection_csv") if from_sheets else spark_csv
@@ -533,7 +563,10 @@ def run_pipeline(
 
     tuned_profile = _prepare_scene_profile(profile_file, scenes, run_dir)
     effective_db = Path(db_path or VF_DB_PATH).resolve()
-    if qc_level is None:
+    sheet_batches = from_sheets and (
+        "exchange_batches" in (sheet_intake or {}) or (run_dir / "vf-sheet-policy.json").is_file()
+    )
+    if qc_level is None and not sheet_batches:
         qc_level = _saved_run_qc_level(effective_db, effective_run_id)
 
     result = PipelineRunResult(
@@ -606,7 +639,7 @@ def run_pipeline(
         result.duration_seconds = round(time.time() - start_time, 2)
         return result
 
-    if intake_data.get("status") in ("waiting", "no_eligible_products"):
+    if intake_data.get("status") in ("waiting", "no_eligible_products") and not sheet_batches:
         result.status = "waiting"
         result.error = intake_data.get("reason") or "Tư liệu thật chưa sẵn sàng."
         pending = intake_data.get("pending_items") or []
@@ -624,7 +657,215 @@ def run_pipeline(
         result.duration_seconds = round(time.time() - start_time, 2)
         return result
 
-    exchange_batch_dir = Path(intake_data.get("exchange_batch_dir", ""))
+    if sheet_batches:
+        qc_level, batches = _pin_sheet_batches(result, run_dir, effective_db, qc_level)
+        day_key = hashlib.sha256(f"{effective_db}:{prod_date}".encode()).hexdigest()[:24]
+        with exclusive_file_lock(PI_RUNS_DIR / f"sheet-{day_key}", label="daily video"):
+            _run_sheet_batches(
+                result, batches, effective_db, tuned_profile, run_dir, profile_path, qc_level, start_time,
+            )
+        result.finished_at = now_bangkok().isoformat()
+        result.duration_seconds = round(time.time() - start_time, 2)
+        return result
+
+    return _run_exchange_batch(
+        result, Path(intake_data.get("exchange_batch_dir") or ""), effective_db, tuned_profile,
+        run_dir, profile_path, qc_level, start_time, from_sheets=from_sheets,
+    )
+
+
+def _sheet_child_run_id(parent_id: str, batch_name: str) -> str:
+    digest = hashlib.sha256(json.dumps([parent_id, batch_name]).encode("utf-8")).hexdigest()
+    return f"sheet_{digest[:32]}"
+
+
+def _pin_sheet_batches(result, run_dir, db_path, qc_level):
+    from contextlib import closing
+    import sqlite3
+
+    batches = result.intake_result.get("exchange_batches", [])
+    if not isinstance(batches, list):
+        raise ValueError("PI exchange_batches must be a list")
+    if result.limit < 1:
+        raise ValueError("Sheet limit must be positive")
+    binding_path = run_dir / "vf-sheet-policy.json"
+    with exclusive_file_lock(binding_path):
+        saved = json.loads(binding_path.read_text(encoding="utf-8")) if binding_path.is_file() else {}
+        if saved:
+            if qc_level is not None and qc_level != saved["qc_level"]:
+                raise ValueError("QC level differs from the pinned Sheet run")
+            if result.provider_mode != saved["provider_mode"]:
+                raise ValueError("Provider mode differs from the pinned Sheet run")
+            if result.limit != saved.get("limit", result.limit):
+                raise ValueError("Limit differs from the pinned Sheet run")
+            qc_level = saved["qc_level"]
+        elif qc_level is None:
+            raise ValueError("Cannot resume QC policy: saved Sheet run policy is missing")
+
+        def row_key(entry):
+            return (entry.get("candidate_id") or entry.get("row_id") or entry.get("batch_path")
+                    if isinstance(entry, dict) else None)
+
+        pinned = saved.get("admitted_batches")
+        if pinned is None:
+            pinned = []
+            # Older runs pinned child selections in VF but had no parent roster.
+            if db_path.is_file():
+                current_paths = {str(Path(entry["batch_path"]).resolve()): entry for entry in batches
+                                 if isinstance(entry, dict) and entry.get("batch_path")}
+                with closing(sqlite3.connect(db_path.as_uri() + "?mode=ro", uri=True)) as conn:
+                    if conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='workflow'").fetchone():
+                        for workflow_id, raw in conn.execute(
+                            "SELECT workflow_id, aggregate_json FROM workflow "
+                            "WHERE workflow_id LIKE 'pv-creative-batch-%' ORDER BY rowid"
+                        ):
+                            batch_path = json.loads(raw).get("batch_dir")
+                            if not batch_path:
+                                continue
+                            path = Path(batch_path).resolve()
+                            child = _sheet_child_run_id(result.run_id, path.name)
+                            if workflow_id == "pv-creative-batch-" + hashlib.sha256(child.encode()).hexdigest()[:24]:
+                                pinned.append(current_paths.get(str(path), {"batch_path": str(path)}))
+        known = {row_key(entry): index for index, entry in enumerate(pinned) if row_key(entry)}
+        known_paths = {entry["batch_path"] for entry in pinned if isinstance(entry, dict) and entry.get("batch_path")}
+        for entry in batches:
+            key = row_key(entry)
+            if key in known:
+                previous = pinned[known[key]]
+                if not previous.get("batch_path") and entry.get("batch_path") and not entry.get("error"):
+                    pinned[known[key]] = entry
+            elif (len(pinned) < result.limit or result.limit == DAILY_VIDEO_LIMIT) and (
+                not isinstance(entry, dict) or entry.get("batch_path") not in known_paths
+            ):
+                if key:
+                    known[key] = len(pinned)
+                pinned.append(entry)
+                if isinstance(entry, dict) and entry.get("batch_path"):
+                    known_paths.add(entry["batch_path"])
+        if len(pinned) > result.limit and result.limit != DAILY_VIDEO_LIMIT:
+            raise ValueError("Existing Sheet selections exceed this run's pinned limit")
+        atomic_json(binding_path, {"qc_level": qc_level, "provider_mode": result.provider_mode,
+                                  "limit": result.limit, "admitted_batches": pinned})
+    return qc_level, pinned
+
+
+def _sheet_video_slots(db_path: Path, day: str) -> set[str]:
+    import sqlite3
+    from contextlib import closing
+
+    if not db_path.is_file():
+        return set()
+    with closing(sqlite3.connect(db_path.as_uri() + "?mode=ro", uri=True)) as conn:
+        if not conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='workflow'").fetchone():
+            return set()
+        rows = conn.execute(
+            """SELECT workflow_id, aggregate_json FROM workflow
+               WHERE json_extract(aggregate_json, '$.source_context.source_date')=?""", (day,),
+        )
+        slots = set()
+        for workflow_id, raw in rows:
+            aggregate = json.loads(raw)
+            state = aggregate.get("state")
+            if aggregate.get("export_result") or (
+                aggregate.get("production_run_id") and state not in {"skipped", "contract_broken"}
+            ):
+                slots.add(aggregate["source_context"].get("product_key") or workflow_id)
+        return slots
+
+
+def _run_sheet_batches(result, batches, db_path, tuned_profile, run_dir, profile_path, qc_level, start_time):
+    result.production_result = {"batches": []}
+    statuses = []
+    seen = set()
+    for entry in batches:
+        child_dir = None
+        row_id = entry.get("row_id") if isinstance(entry, dict) else None
+        candidate_id = entry.get("candidate_id") if isinstance(entry, dict) else None
+        name = (entry.get("name") if isinstance(entry, dict) else None) or row_id or "PI product"
+        product_key = None
+        try:
+            if not isinstance(entry, dict):
+                raise ValueError("Invalid PI batch entry")
+            if entry.get("error") or not entry.get("batch_path"):
+                raise ValueError(entry.get("error") or "Missing PI batch path")
+            child_dir = Path(entry["batch_path"]).resolve()
+            if child_dir in seen:
+                continue
+            seen.add(child_dir)
+            if child_dir.parent != (INBOX_ROOT / result.production_date).resolve():
+                raise ValueError("PI batch must be inside the inbox for this production date")
+            if not (child_dir / "READY").is_file():
+                raise ValueError("PI batch is missing READY")
+            manifest = json.loads((child_dir / "manifest.json").read_text(encoding="utf-8"))
+            products = manifest["products"]
+            if len(products) != 1 or not products[0].get("product_key"):
+                raise ValueError("Per-row PI batch must contain exactly one product key")
+            product_key = products[0]["product_key"]
+            slots = _sheet_video_slots(db_path, result.production_date)
+            if len(slots) >= DAILY_VIDEO_LIMIT and product_key not in slots:
+                statuses.append("success")
+                result.product_outcomes.append({
+                    "row_id": row_id, "candidate_id": candidate_id, "product_name": name, "product_key": product_key,
+                    "status": "skipped", "stage": "exchange_admission", "reason": "DAILY_VIDEO_CAP_REACHED",
+                })
+                continue
+            child = PipelineRunResult(
+                _sheet_child_run_id(result.run_id, child_dir.name), "running", result.production_date,
+                result.spark_csv, result.spark_csv_sha256, result.scenes, 1, result.provider_mode,
+            )
+            _run_exchange_batch(
+                child, child_dir, db_path, tuned_profile, run_dir, profile_path, qc_level, start_time,
+                from_sheets=True, product_key=product_key,
+            )
+        except (OSError, ValueError, KeyError, TypeError, AttributeError) as exc:
+            statuses.append("failed")
+            result.product_outcomes.append({
+                "row_id": row_id, "candidate_id": candidate_id, "product_name": name, "product_key": product_key,
+                "status": "failed", "stage": "exchange_admission", "reason": str(exc),
+            })
+            continue
+        statuses.append(child.status)
+        result.production_result["batches"].append({
+            "batch_path": str(child_dir), "run_id": child.run_id, "status": child.status,
+            **child.production_result,
+        })
+        result.product_outcomes.extend(
+            {**item, "row_id": row_id, "candidate_id": candidate_id, "product_key": product_key}
+            for item in child.product_outcomes
+        )
+        if not child.product_outcomes:
+            result.product_outcomes.append({
+                "row_id": row_id, "candidate_id": candidate_id, "product_key": product_key, "product_name": name,
+                "status": child.status, "stage": "creative_batch", "reason": child.error,
+            })
+        result.inspection_errors.extend(child.inspection_errors)
+        result.exported_videos.extend(child.exported_videos)
+    pending = (result.intake_result.get("pending_items") or []) if len(batches) < result.limit else []
+    for name in pending:
+        statuses.append("waiting")
+        result.product_outcomes.append({
+            "product_name": name, "status": "waiting", "stage": "pi_intake",
+            "reason": result.intake_result.get("reason"),
+        })
+    if statuses and all(status == "success" for status in statuses):
+        result.status = "success"
+    elif result.exported_videos:
+        result.status = "partial"
+        result.error = "Some products still need attention"
+    elif not statuses or all(status == "waiting" for status in statuses):
+        result.status = "waiting"
+        result.error = "No completed PI/VF product yet"
+    else:
+        result.status = "failed"
+        result.error = "No product has a verified MP4"
+
+
+def _run_exchange_batch(result, exchange_batch_dir, effective_db, tuned_profile, run_dir,
+                        profile_path, qc_level, start_time, *, from_sheets, product_key=None):
+    effective_run_id = result.run_id
+    prod_date = result.production_date
+    provider_mode = result.provider_mode
+    scenes = result.scenes
     if not exchange_batch_dir.is_dir() or not (exchange_batch_dir / "READY").is_file():
         result.status = "waiting"
         result.error = "Exchange READY artifact is missing or pending operator intake completion."
@@ -678,13 +919,16 @@ def run_pipeline(
         "-m", "video_factory.cli", "creative-batch",
         "--run-id", effective_run_id,
         "--date", prod_date,
-        "--limit", str(limit),
         "--profile", str(effective_profile_to_use),
         "--provider-mode", provider_mode,
         "--qc-level", qc_level,
         "--inbox-root", str(INBOX_ROOT),
         "--db-path", str(effective_db),
     ]
+    if product_key is None:
+        vf_cmd.extend(("--limit", str(result.limit)))
+    else:
+        vf_cmd.extend(("--product-key", product_key))
     if from_sheets:
         vf_cmd.extend(("--exchange-batch", str(exchange_batch_dir)))
 
@@ -722,6 +966,7 @@ def run_pipeline(
     # Strictly query export receipts and workflows belonging to THIS run
     db_probes, db_outcomes = _inspect_run_workflows(
         effective_db, effective_run_id, exchange_batch_dir, provider_mode=provider_mode,
+        expected_product_key=product_key,
         inspection_errors=result.inspection_errors,
     )
 
@@ -729,7 +974,7 @@ def run_pipeline(
     product_outcomes: list[dict[str, Any]] = list(db_outcomes)
 
     # If DB inspection didn't find items (e.g. mock test environment), check stdout receipts
-    if not exported_probes and not product_outcomes and not result.inspection_errors:
+    if product_key is None and not exported_probes and not product_outcomes and not result.inspection_errors:
         for line in vf_stdout.splitlines():
             line_clean = line.strip()
             if "Thành công — " in line_clean:
@@ -769,7 +1014,7 @@ def run_pipeline(
     result.product_outcomes = product_outcomes
 
     total_prods = len(product_outcomes)
-    succ_count = sum(1 for p in product_outcomes if p.get("status") == "success")
+    succ_count = sum(1 for p in product_outcomes if p.get("status") in {"success", "reused"})
 
     if result.inspection_errors:
         result.status = "partial" if succ_count else "failed"

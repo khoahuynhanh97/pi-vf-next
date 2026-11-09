@@ -15,6 +15,7 @@ import hashlib
 import json
 import os
 import sqlite3
+from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -65,6 +66,7 @@ def _quarantine_storyboard_outbox(
     scene_plan: Any | None = None,
     project_id: str | None = None,
     owner_user_id: str | None = None,
+    job_kwargs: dict[str, Any] | None = None,
 ) -> int:
     payload: dict[str, Any] = {
         "job_name": "product_video.storyboard",
@@ -72,8 +74,8 @@ def _quarantine_storyboard_outbox(
     }
     if scene_plan is not None:
         payload["args"] = [scene_plan.to_dict() if hasattr(scene_plan, "to_dict") else scene_plan]
-    if project_id or owner_user_id:
-        kwargs: dict[str, Any] = {}
+    if project_id or owner_user_id or job_kwargs:
+        kwargs = dict(job_kwargs or {})
         if project_id:
             kwargs["project_id"] = project_id
             payload["project_id"] = project_id
@@ -262,14 +264,34 @@ def test_output_download_reconcile_is_bounded_and_survives_restart(tmp_path: Pat
     reopened.close()
 
 
-def test_recover_unknown_keyframe_retries_download_without_resubmitting(tmp_path: Path, monkeypatch):
+@pytest.mark.parametrize("request_kind", ["original", "replacement_start", "replacement_end", "abandon_legacy_end"])
+def test_recover_unknown_keyframe_retries_download_without_resubmitting(tmp_path: Path, monkeypatch, request_kind):
     conn = connect(tmp_path / "recover_download.db")
     workflow_id = "wf_download_reconcile"
-    _script, _dossier, requests = _setup_workflow_in_db(
+    script, dossier, requests = _setup_workflow_in_db(
         conn, workflow_id=workflow_id, tmp_path=tmp_path,
     )
     request = requests[0]
     store = KeyframeOperationStore(conn)
+    job_kwargs = {}
+    if request_kind != "original":
+        feedback = "Operator-authorized replacement after unknown outcome"
+        plan = {"frames": [{"frame_id": request.frame_id, "actions": ["regenerate_keyframe"], "feedback": feedback}]}
+        job_kwargs = {"recovery_plan": plan, "recovery_attempt": 1}
+        replacement_start, replacement_end = compile_keyframe_requests(
+            workflow_id=workflow_id, project_id=request.project_id, dossier=dossier, script=script,
+            recovery_plan=plan, recovery_attempt=1, legacy_implicit_end_recovery=True,
+        )
+        request = replace(replacement_start, prompt=replacement_start.prompt + f"\n[QC REVISION GUIDANCE: {feedback}]")
+        if request_kind in {"replacement_end", "abandon_legacy_end"}:
+            start_path = _create_test_image(tmp_path / "completed-start.png")
+            store.claim_first_submission(request, "google_flow")
+            store.save_result(request, KeyframeGenerationResult(request.operation_id, "completed", image_path=str(start_path)))
+            from video_factory.creative.storyboard import prepare_keyframe_generation_request
+            request = prepare_keyframe_generation_request(
+                replacement_end, conditioning_start_path=str(start_path),
+                feedback="START frame was regenerated; update END frame to match new START frame",
+            )
     assert store.claim_first_submission(request, "google_flow") is True
     project_url = "https://flow.google.com/project/11111111-2222-3333-4444-555555555555"
     store.record_project_checkpoint(request, project_url, "google_flow")
@@ -277,7 +299,38 @@ def test_recover_unknown_keyframe_retries_download_without_resubmitting(tmp_path
         operation_id=request.operation_id, status="unknown", provider_operation_id=project_url,
         error_code="RECONCILIATION_REQUIRED",
     ))
-    _quarantine_storyboard_outbox(conn, workflow_id, "RECONCILIATION_REQUIRED: output download timed out")
+    _quarantine_storyboard_outbox(
+        conn, workflow_id, "RECONCILIATION_REQUIRED: output download timed out", job_kwargs=job_kwargs,
+    )
+    if request_kind == "abandon_legacy_end":
+        capacity = ProviderCapacityStore(conn)
+        assert capacity.try_acquire(provider_kind="google_flow", operation_id=request.operation_id,
+                                    lease_owner="old-worker", limit=1)
+        capacity.bind_provider_operation("google_flow", request.operation_id, project_url)
+        store.save_result(request, KeyframeGenerationResult(
+            request.operation_id, "unknown", provider_operation_id=project_url,
+            error_code="GOOGLE_FLOW_OUTPUT_NOT_RETRIEVED",
+            metadata={"send_attempted": True, "output_reconciliation_attempts": 3,
+                      "output_reconciliation_finished_attempt": 3},
+        ))
+        with conn:
+            conn.execute("UPDATE video_factory_provider_capacity SET lease_expires_at=0")
+        result = recover_unknown_keyframe_submission(
+            conn, workflow_id=workflow_id, owner_user_id="owner_alice", operation_id=request.operation_id,
+            replacement_note="Omit the unplanned END after the third unsuccessful poll.",
+        )
+        assert result["resumed"] and result["replaced"] == 0
+        assert result["recovery_plan"]["frames"] == []
+        assert store.get(request.operation_id)["status"] == "abandoned_unknown"
+        assert capacity.active("google_flow") == []
+        message = json.loads(conn.execute(
+            "SELECT message FROM workflow_outbox WHERE workflow_id=? AND state='pending'", (workflow_id,),
+        ).fetchone()[0])
+        frames = message["payload"]["kwargs"]["previous_storyboard"]["generated_keyframes"]
+        assert [frame["frame_id"] for frame in frames] == [replacement_start.frame_id]
+        assert Path(frames[0]["image_path"]) == start_path
+        conn.close()
+        return
     image = _create_test_image(tmp_path / "recovered.png")
 
     class ExistingProjectProvider:
@@ -291,7 +344,7 @@ def test_recover_unknown_keyframe_retries_download_without_resubmitting(tmp_path
             raise AssertionError("download reconciliation must never submit generation")
 
         def reconcile_existing_output(self, target_request, url):
-            assert target_request.operation_id == request.operation_id
+            assert target_request == request
             assert url == project_url
             self.calls += 1
             attempt = self.store.claim_output_reconciliation(
@@ -407,6 +460,108 @@ def test_unknown_keyframe_status_keeps_operation_and_capacity_locked(tmp_path: P
     assert conn2.execute("SELECT state FROM workflow_outbox WHERE workflow_id=?", (wf_id,)).fetchone()[0] == "quarantined"
 
     conn2.close()
+
+
+def test_operator_can_replace_unretrievable_flow_output_after_poll_budget(tmp_path, monkeypatch):
+    conn = connect(tmp_path / "operator-replace.db")
+    wf, owner = "wf-replace", "owner-replace"
+    script, dossier, requests = _setup_workflow_in_db(
+        conn, workflow_id=wf, owner_user_id=owner, project_id="proj-replace", tmp_path=tmp_path,
+    )
+    request = requests[0]
+    project_url = "https://flow.google.com/project/57cd810f-5f7f-4b46-9978-3fb460c5272e"
+    _quarantine_storyboard_outbox(conn, wf, "[RECONCILIATION_REQUIRED] Flow output unknown")
+    store = KeyframeOperationStore(conn)
+    store.claim_first_submission(request, "google_flow")
+    capacity = ProviderCapacityStore(conn)
+    assert capacity.try_acquire(provider_kind="google_flow", operation_id=request.operation_id,
+                                lease_owner="old-worker", limit=1)
+    capacity.bind_provider_operation("google_flow", request.operation_id, project_url)
+
+    def save_poll(attempts):
+        store.save_result(request, KeyframeGenerationResult(
+            request.operation_id, "unknown", provider_operation_id=project_url,
+            error_code="GOOGLE_FLOW_OUTPUT_NOT_RETRIEVED",
+            metadata={"send_attempted": True, "output_reconciliation_attempts": attempts,
+                      "output_reconciliation_finished_attempt": attempts},
+        ))
+
+    kwargs = dict(workflow_id=wf, owner_user_id=owner, operation_id=request.operation_id,
+                  replacement_note="User authorized one replacement after three unsuccessful polls.")
+    save_poll(2)
+    with pytest.raises(ValueError, match="poll budget"):
+        recover_unknown_keyframe_submission(conn, **kwargs)
+    assert store.claim_output_reconciliation(request.operation_id, project_url) == 3
+    with pytest.raises(ValueError, match="poll budget"):
+        recover_unknown_keyframe_submission(conn, **kwargs)
+    save_poll(3)
+    provider = MagicMock(spec=["reconcile_existing_output"])
+    provider.reconcile_existing_output.return_value = KeyframeGenerationResult(
+        request.operation_id, "unknown", provider_operation_id=project_url,
+        error_code="OUTPUT_RECONCILIATION_EXHAUSTED",
+    )
+    monkeypatch.setattr(
+        "video_factory.integrations.keyframe_provider_factory.resolve_keyframe_provider",
+        lambda *_args, **_kwargs: (provider, "google_flow"),
+    )
+    poll_kwargs = {key: value for key, value in kwargs.items() if key != "replacement_note"}
+    with pytest.raises(ValueError, match="OUTPUT_RECONCILIATION_EXHAUSTED"):
+        recover_unknown_keyframe_submission(conn, **poll_kwargs)
+    assert store.get(request.operation_id)["error_code"] == "GOOGLE_FLOW_OUTPUT_NOT_RETRIEVED"
+    with pytest.raises(ValueError, match="active"):
+        recover_unknown_keyframe_submission(conn, **kwargs)
+    with conn:
+        conn.execute("UPDATE video_factory_provider_capacity SET lease_expires_at=0")
+    result = recover_unknown_keyframe_submission(conn, **kwargs)
+    assert result["replaced"] == 1 and result["resumed"] is True
+    assert store.get(request.operation_id)["status"] == "abandoned_unknown"
+    assert store.get(request.operation_id)["provider_operation_id"] == project_url
+    assert capacity.active("google_flow") == []
+    recovery = WorkflowRepository(conn).get_workflow(wf)[0]["keyframe_recovery_plan"]
+    assert [frame["frame_id"] for frame in recovery["frames"]] == [request.frame_id]
+    replacement_requests = compile_keyframe_requests(
+        workflow_id=wf, project_id="proj-replace", dossier=dossier, script=script,
+        recovery_plan=recovery, recovery_attempt=result["recovery_attempt"],
+    )
+    assert [frame.frame_id for frame in replacement_requests] == [request.frame_id]
+    with pytest.raises(ValueError, match="quarantined"):
+        recover_unknown_keyframe_submission(conn, **kwargs)
+    conn.close()
+
+
+@pytest.mark.parametrize("status", ["unknown", "project_created"])
+def test_aged_keyframe_checkpoint_keeps_capacity_during_worker_and_runtime(tmp_path, status):
+    from datetime import timedelta
+
+    from video_factory.integrations.keyframe_provider import KeyframeRuntime
+    from video_factory.workflows.worker import _tick_ui_maintenance
+
+    conn = connect(tmp_path / "aged.db")
+    _, _, requests = _setup_workflow_in_db(
+        conn, workflow_id="aged", owner_user_id="owner", project_id="project", tmp_path=tmp_path,
+    )
+    request = requests[0]
+    store = KeyframeOperationStore(conn)
+    capacity = ProviderCapacityStore(conn)
+    assert capacity.try_acquire(provider_kind="google_flow", operation_id=request.operation_id,
+                                lease_owner="dead-worker", lease_seconds=1800, limit=1)
+    url = "https://flow.google.com/project/aged"
+    store.claim_first_submission(request, "google_flow")
+    store.record_project_checkpoint(request, url, "google_flow")
+    capacity.bind_provider_operation("google_flow", request.operation_id, url)
+    with conn:
+        conn.execute("UPDATE video_factory_keyframe_operation SET submitted_at=?, status=?",
+                     ((datetime.now(timezone.utc) - timedelta(minutes=20)).isoformat(), status))
+    _tick_ui_maintenance(conn)
+    assert store.get(request.operation_id)["status"] == status
+
+    provider = MagicMock(spec=["provider_kind", "submit", "get_status"])
+    provider.provider_kind = "google_flow"
+    result = KeyframeRuntime(store=store, provider=provider, capacity_store=capacity).run(request)
+    assert result.status == "unknown"
+    assert capacity.active("google_flow")[0]["provider_operation_id"] == url
+    provider.submit.assert_not_called()
+    conn.close()
 
 
 @pytest.mark.parametrize(("outcome", "expected_status"), [

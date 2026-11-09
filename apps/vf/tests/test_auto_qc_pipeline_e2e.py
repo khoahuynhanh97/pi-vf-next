@@ -713,7 +713,10 @@ def test_scenario_6_exhaustion_skips_one_product_and_batch_continues(tmp_path: P
 # START→END cascade, frame PASS độc lập được giữ; hết lượt thì chờ người
 # và không render.
 # =====================================================================
-def test_scenario_7_keyframe_targeted_recovery_cascade_and_operator_pause(tmp_path: Path) -> None:
+@pytest.mark.parametrize("low_qc_with_plan", [False, True])
+def test_scenario_7_keyframe_targeted_recovery_cascade_and_operator_pause(
+    tmp_path: Path, low_qc_with_plan: bool,
+) -> None:
     # 1. Test targeted keyframe recovery planning logic directly
     frames = [
         {"frame_id": "scene_1-start", "frame_role": "start", "url": "https://img.test/f0.png"},
@@ -759,6 +762,9 @@ def test_scenario_7_keyframe_targeted_recovery_cascade_and_operator_pause(tmp_pa
     cur_agg, cur_ver = wf_tuple
     cur_agg["state"] = ProductVideoWorkflowState.CREATING_STORYBOARD.value
     cur_agg["project_id"] = "proj_7"
+    if low_qc_with_plan:
+        cur_agg["creative_policy"] = {"qc_level": "low"}
+        cur_agg["scene_plan"] = {"scene_plan_id": "sp_7"}
     repo.commit_workflow(workflow_id=wf_id, aggregate_json=json.dumps(cur_agg), events=[], expected_version=cur_ver)
 
     artifact = {
@@ -792,6 +798,8 @@ def test_scenario_7_keyframe_targeted_recovery_cascade_and_operator_pause(tmp_pa
             "score": 40,
             "report_id": "rep_kf_fail_7",
             "reason": "Keyframe QC failed on scene_1-start",
+            "findings": {"recovery_plan": {"frames": [{"frame_id": "scene_1-start"}]}}
+            if low_qc_with_plan else {},
         },
     )
 
@@ -821,6 +829,12 @@ def test_scenario_7_keyframe_targeted_recovery_cascade_and_operator_pause(tmp_pa
     data_7 = repo.get_workflow(wf_id)
     assert data_7 is not None
     agg_7 = data_7[0]
+    if low_qc_with_plan:
+        assert agg_7["state"] == ProductVideoWorkflowState.CREATING_STORYBOARD.value
+        assert agg_7["keyframe_recovery_attempt"] == 1
+        assert agg_7["keyframe_recovery_plan"]["frames"] == [{"frame_id": "scene_1-start"}]
+        monkeypatch.undo()
+        return
     assert agg_7["state"] == ProductVideoWorkflowState.WAITING_FOR_OPERATOR.value
     assert agg_7["operator_stage"] == "keyframe"
     assert agg_7["operator_action"] == "qc_provider_retry"

@@ -4,7 +4,7 @@ import hashlib
 import json
 import logging
 import time
-from dataclasses import asdict, is_dataclass, replace
+from dataclasses import asdict, is_dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
@@ -1068,6 +1068,7 @@ class ProductVideoJobHandlers:
             return
         from video_factory.creative.agents.contracts import BackendProfile
         from video_factory.creative.agents.service import AgenticCreativeGenerator
+        director_config_version = policy.get('director_config_version')
         if self.provider_mode == "fake":
             from video_factory.creative.agents.fakes import FakeRoles
             target_scenes = int(policy.get("max_scenes", 4))
@@ -1078,6 +1079,7 @@ class ProductVideoJobHandlers:
                 category=policy['category'],
                 visible_details=policy['visible_details'],
                 source_verifier=None,
+                director_config_version=director_config_version,
             )
             return
         if self.creative_generator is None:
@@ -1086,7 +1088,8 @@ class ProductVideoJobHandlers:
                                                                           creative_mode='legacy')
         self.creative_generator=AgenticCreativeGenerator(self.creative_generator.model,
             profile=BackendProfile.from_dict(policy['profile']), category=policy['category'],
-            visible_details=policy['visible_details'],source_verifier=self.creative_generator.source_verifier)
+            visible_details=policy['visible_details'],source_verifier=self.creative_generator.source_verifier,
+            director_config_version=director_config_version)
 
     def creative_brief_job(self, ctx: JobContext, product_id: str, brief_config: dict | None = None, **kwargs: Any) -> JobSucceeded | JobFailed:
         self._bind_creative_run(ctx)
@@ -1400,20 +1403,19 @@ class ProductVideoJobHandlers:
                     res_dict = dict(script_v2.to_dict())
                     res_dict.update(creative_envelopes)
                     res_dict["schema_version"] = "script-scene-plan-v2"
-                    # Hash the exact serialized payload handed to the next
-                    # worker. A digest of the in-memory object can diverge if
-                    # its nested scene data was normalized during generation.
-                    res_dict["script_digest"] = ScriptScenePlanV2.from_dict(
-                        {**res_dict, "script_digest": ""}
-                    ).digest()
+                    res_dict["script_digest"] = script_v2.digest() if four_agent else ScriptScenePlanV2.from_dict({**res_dict, "script_digest": ""}).digest()
                     res_dict["project_id"] = proj_id
                     res_dict["research_dossier"] = dossier.to_dict() if hasattr(dossier, "to_dict") else dossier_dict
                     if isinstance(result, dict) and "scene_plan_id" in result:
                         res_dict["scene_plan_id"] = result["scene_plan_id"]
-                    if four_agent and policy.get("preproduction_gate") == "observe":
+                    if four_agent and policy.get("preproduction_gate") == "observe" and policy.get("qc_level") != "low":
                         from video_factory.creative.agents.contracts import CreativeReview
                         from video_factory.creative.agents.critic import CreativeCritic, review_input_digest
                         from video_factory.creative.agents.gates import scored_preproduction_inputs
+
+                        if policy.get("rubric_version") == "v2":
+                            res_dict["rubric_version"] = "v2"
+                            res_dict["director_config_version"] = policy.get("director_config_version", "legacy")
 
                         threshold = policy.get("preproduction_threshold", 80)
                         review_digest = res_dict["script_digest"]
@@ -1430,8 +1432,13 @@ class ProductVideoJobHandlers:
                             logging.getLogger(__name__).warning(
                                 "Preproduction observation for %s failed: %s", ctx.workflow_id, type(exc).__name__
                             )
+                            coverage = {"error_type": type(exc).__name__}
+                            evaluator_receipt = {}
+                            if policy.get("rubric_version") == "v2":
+                                evaluator_receipt["rubric_version"] = "v2"
+                                evaluator_receipt["director_config_version"] = res_dict.get("director_config_version")
                             review = CreativeReview("preproduction", "UNKNOWN", review_digest, (),
-                                                    {"error_type": type(exc).__name__}, {})
+                                                    coverage, evaluator_receipt)
                         res_dict.update(
                             preproduction_review=review.to_dict(), preproduction_threshold=threshold,
                             review_input_digests={"preproduction": review.input_digest},
@@ -1517,6 +1524,7 @@ class ProductVideoJobHandlers:
                     cascade_keyframe_qc_failures,
                     compile_keyframe_requests,
                     plan_initial_storyboard_recovery,
+                    prepare_keyframe_generation_request,
                     resolve_reusable_storyboard_frames,
                         StoryboardContractError,
                     storyboard_package_digest,
@@ -1659,6 +1667,7 @@ class ProductVideoJobHandlers:
                                 generated_keyframes.append(dict(prior))
                                 continue
                         conditioning_start_sha = ""
+                        conditioning_start_path = ""
                         if req.frame_role == "end":
                             start_frame = next(
                                 (
@@ -1676,25 +1685,11 @@ class ProductVideoJobHandlers:
                                 or hashlib.sha256(start_path.read_bytes()).hexdigest() != conditioning_start_sha
                             ):
                                 raise ValueError("END keyframe START conditioning image changed")
-                            req = replace(
-                                req,
-                                prompt=(
-                                    req.prompt
-                                    + "\nThe first attached image is the approved START frame of this same scene. "
-                                    "Keep its exact table material, shape, furniture layout, camera context, "
-                                    "product surface and pool position. Show only the specified action and end state. "
-                                    "If water is specified near but not on the product, keep the product completely dry."
-                                ),
-                                reference_image_paths=(str(start_path), *req.reference_image_paths)[:4],
-                            )
-                        if req.frame_id in feedback_map and feedback_map[req.frame_id]:
-                            req = replace(
-                                req,
-                                prompt=(
-                                    req.prompt
-                                    + f"\n[QC REVISION GUIDANCE: {feedback_map[req.frame_id]}]"
-                                ),
-                            )
+                            conditioning_start_path = str(start_path)
+                        req = prepare_keyframe_generation_request(
+                            req, feedback=feedback_map.get(req.frame_id, ""),
+                            conditioning_start_path=conditioning_start_path,
+                        )
                         if ctx.heartbeat_fn is not None and not ctx.heartbeat_fn():
                             return JobFailed(retryable=True, code="STALE_LEASE", message="Storyboard lease expired before keyframe generation")
                         generation_attempt = None
@@ -1727,7 +1722,7 @@ class ProductVideoJobHandlers:
                                 "HTTP_429", "HTTP_500", "HTTP_502", "HTTP_503", "HTTP_504",
                             }:
                                 return JobFailed(
-                                    retryable=True, code="PROVIDER_CAPACITY_WAIT",
+                                    retryable=True, code=str(kf_res.error_code).upper(),
                                     message=kf_res.error_message or (
                                         f"Keyframe provider returned {kf_res.error_code}; retry later"
                                     ),

@@ -87,6 +87,7 @@ def run_keyframe_qc(
     attempt_id: str = "",
     owner_user_id: str = "",
     project_id: str = "",
+    essential_only: bool = False,
 ) -> QCReport:
     owner_user_id = str(owner_user_id or package.get("owner_user_id") or "").strip()
     project_id = str(project_id or package.get("project_id") or "").strip()
@@ -243,10 +244,25 @@ def run_keyframe_qc(
                     scene_prompt=str(frame.get("prompt") or ""),
                     candidate_dimensions=candidate_dimensions,
                     approved_script_scene=approved_scene,
+                    essential_only=essential_only,
                 ),
                 system_instruction=KEYFRAME_QC_SYSTEM_PROMPT,
             )
             normalized = validate_qc_response(response, QCStage.KEYFRAME)
+            if essential_only:
+                hard_failure = bool(
+                    response["hard_failure"]
+                    or normalized["identity_mismatch"]
+                    or normalized["source_branding_detected"]
+                    or normalized["black_bars_detected"] is True
+                    or not normalized["prompt_reference_consistent"]
+                    or not normalized["script_adherence"]
+                    or not normalized["important_details_preserved"]
+                )
+                normalized["hard_failure"] = hard_failure
+                normalized["verdict"] = (
+                    "unknown" if response["verdict"] == "unknown" else "fail" if hard_failure else "pass"
+                )
             score = int(normalized["total_score"])
             hard_failure = bool(normalized["hard_failure"])
             verdict = str(normalized["verdict"])
@@ -382,6 +398,7 @@ def run_keyframe_qc(
         storyboard=package,
         reference_digests=reference_digests,
         attempt_id=attempt_id,
+        keyframe_essential_only=essential_only,
     )
     recovery_frames: list[dict[str, Any]] = []
     for item in items:

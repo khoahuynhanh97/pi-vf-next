@@ -94,6 +94,8 @@ def _strip_legacy_default_fields(payload: dict[str, Any], schema_version: str) -
                 ):
                     asset.pop(key, None)
     elif schema_version == "script-scene-plan-v2":
+        if not normalized.get("scene_bible"):
+            normalized.pop("scene_bible", None)
         scene_defaults: dict[str, Any] = {
             "product_identity_cues": (),
             "product_placement": "",
@@ -661,6 +663,43 @@ class ScriptSceneV2:
 
 
 @dataclass(frozen=True)
+class SceneBible:
+    environment: str
+    lighting: str
+    pov_hand: str
+    camera_baseline: str
+
+    def __post_init__(self) -> None:
+        for f in ("environment", "lighting", "pov_hand", "camera_baseline"):
+            val = getattr(self, f)
+            if not isinstance(val, str) or not val.strip():
+                raise ValueError(f"scene_bible {f} must be a nonempty string")
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> SceneBible:
+        if not isinstance(data, dict):
+            raise ValueError("scene_bible must be an object")
+        allowed = {"environment", "lighting", "pov_hand", "camera_baseline"}
+        if set(data.keys()) != allowed:
+            raise ValueError(f"scene_bible must contain exactly the keys: {', '.join(sorted(allowed))}")
+        raw_values = {}
+        for k in allowed:
+            val = data[k]
+            if not isinstance(val, str) or not val.strip():
+                raise ValueError(f"scene_bible {k} must be a nonempty string")
+            raw_values[k] = val
+        return cls(
+            environment=raw_values["environment"],
+            lighting=raw_values["lighting"],
+            pov_hand=raw_values["pov_hand"],
+            camera_baseline=raw_values["camera_baseline"],
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass(frozen=True)
 class ScriptScenePlanV2:
     target_duration_seconds: int
     brief_digest: str
@@ -670,6 +709,7 @@ class ScriptScenePlanV2:
     prompt_version: str = "script-scene-plan-v2"
     provenance: GenerationProvenance = field(default_factory=GenerationProvenance)
     script_digest: str = ""
+    scene_bible: SceneBible | None = None
 
     def __post_init__(self) -> None:
         if not self.brief_digest.strip() or not self.scenes:
@@ -677,6 +717,12 @@ class ScriptScenePlanV2:
         orders = [scene.order for scene in self.scenes]
         if sorted(orders) != list(range(1, len(orders) + 1)):
             raise ValueError("scene order must be contiguous from one")
+        if self.scene_bible is not None:
+            for idx, scene in enumerate(self.scenes, 1):
+                if scene.environment != self.scene_bible.environment or scene.lighting != self.scene_bible.lighting:
+                    raise ValueError(
+                        f"scene {idx} environment {scene.environment!r} or lighting {scene.lighting!r} does not match scene_bible ({self.scene_bible.environment!r}, {self.scene_bible.lighting!r})"
+                    )
 
     @classmethod
     def create(cls, **values: Any) -> ScriptScenePlanV2:
@@ -694,6 +740,14 @@ class ScriptScenePlanV2:
         if not isinstance(raw_scenes, (list, tuple)):
             raise ValueError("script scenes must be a list")
         expected = str(data.get("script_digest") or "")
+        bible_val = data.get("scene_bible")
+        if bible_val is not None and not isinstance(bible_val, (dict, SceneBible)):
+            raise ValueError("scene_bible must be an object")
+        scene_bible = (
+            bible_val
+            if isinstance(bible_val, SceneBible)
+            else (SceneBible.from_dict(bible_val) if isinstance(bible_val, dict) else None)
+        )
         if expected:
             # A digest-bearing payload is already a canonical contract record.
             # Preserve its explicit values while rebuilding the dataclasses;
@@ -725,6 +779,7 @@ class ScriptScenePlanV2:
                 schema_version=str(data.get("schema_version", "script-scene-plan-v2")),
                 prompt_version=str(data.get("prompt_version", "script-scene-plan-v2")),
                 provenance=provenance or _provenance_from_dict(data.get("provenance")),
+                scene_bible=scene_bible,
             )
             if plan.digest() != expected:
                 raise ValueError("script scene plan digest mismatch")
@@ -817,6 +872,7 @@ class ScriptScenePlanV2:
             schema_version=str(data.get("schema_version", "script-scene-plan-v2")),
             prompt_version=str(data.get("prompt_version", "script-scene-plan-v2")),
             provenance=provenance or _provenance_from_dict(data.get("provenance")),
+            scene_bible=scene_bible,
         )
         return plan
 
@@ -824,7 +880,10 @@ class ScriptScenePlanV2:
         return canonical_digest(self)
 
     def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
+        result = asdict(self)
+        if result.get("scene_bible") is None:
+            result.pop("scene_bible", None)
+        return result
 
 
 class ProductCategory(str, Enum):

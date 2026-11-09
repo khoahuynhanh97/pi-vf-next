@@ -1,20 +1,57 @@
 """Director authors exact state and motion prompts, without the legacy normalizer."""
+from copy import deepcopy
 import json
 from dataclasses import replace, fields
 
-from ..contracts import ScriptScenePlanV2, ScriptSceneV2
+from ..contracts import ScriptScenePlanV2, ScriptSceneV2, SceneBible
 from ..generator import SingleModelCreativeGenerator
 from ..generator import StructuredGenerationError
 from ..prompts import COMMON_GROUNDED_SYSTEM_PROMPT, SCRIPT_SCENE_PLAN_PROMPT_V2
 from ..validation import validate_script
 from .contracts import ScenePromptBundle
 from .strategist import RoleModel, dossier_media
-from .schemas import DIRECTOR_SCRIPT_SCHEMA, SCENE_PROMPT_BUNDLE_SCHEMA
+from .schemas import DIRECTOR_SCRIPT_SCHEMA, SCENE_BIBLE_SCHEMA, SCENE_PROMPT_BUNDLE_SCHEMA
+
+
+def format_scene_bible_suffix(bible: SceneBible) -> str:
+    return (
+        f"Scene bible: Environment: {bible.environment} | "
+        f"Lighting: {bible.lighting} | "
+        f"POV/Hand: {bible.pov_hand} | "
+        f"Camera baseline: {bible.camera_baseline}"
+    )
+
+
+def bind_prompt_bible(prompt_text: str, bible: SceneBible | None) -> str:
+    if not prompt_text or bible is None:
+        return prompt_text
+    if (
+        bible.environment in prompt_text
+        and bible.lighting in prompt_text
+        and bible.pov_hand in prompt_text
+        and bible.camera_baseline in prompt_text
+    ):
+        return prompt_text
+    suffix = format_scene_bible_suffix(bible)
+    return prompt_text.rstrip() + "\n" + suffix
+
+
+def bind_scene_bible(bundle: ScenePromptBundle, bible: SceneBible | None) -> ScenePromptBundle:
+    if bible is None:
+        return bundle
+    bound_prompts = []
+    for prompt in bundle.prompts:
+        start = bind_prompt_bible(prompt.start_prompt, bible)
+        video = bind_prompt_bible(prompt.video_prompt, bible)
+        end = bind_prompt_bible(prompt.end_prompt, bible) if prompt.end_prompt else ""
+        bound_prompts.append(replace(prompt, start_prompt=start, video_prompt=video, end_prompt=end))
+    return replace(bundle, prompts=tuple(bound_prompts))
 
 
 class VisualDirector:
-    def __init__(self, model, *, recipe, profile, source_verifier):
+    def __init__(self, model, *, recipe, profile, source_verifier, director_config_version=None):
         self.model, self.recipe, self.profile, self.verifier = model, recipe, profile, source_verifier
+        self.director_config_version = director_config_version
 
     def port(self, dossier, *, system_prompt_override=None):
         return RoleModel(self.model, role='visual-director', recipe=self.recipe,
@@ -47,6 +84,30 @@ class VisualDirector:
                 raise ValueError('Director must return script-scene-plan-v2')
             if data.get('brief_digest') != brief.digest():
                 raise ValueError('Director brief binding mismatch')
+            bible = None
+            if self.director_config_version == 'scene-bible-v1':
+                raw_bible = data.get('scene_bible')
+                if not raw_bible or not isinstance(raw_bible, dict):
+                    raise ValueError('DIRECTOR_SCENE_BIBLE_MISMATCH: missing scene_bible')
+                try:
+                    bible = SceneBible.from_dict(raw_bible)
+                except ValueError as exc:
+                    raise ValueError(f'DIRECTOR_SCENE_BIBLE_MISMATCH: {exc}') from exc
+            elif data.get('scene_bible'):
+                try:
+                    bible = SceneBible.from_dict(data['scene_bible'])
+                except ValueError as exc:
+                    raise ValueError(f'DIRECTOR_SCENE_BIBLE_MISMATCH: {exc}') from exc
+
+            if bible is not None:
+                for idx, raw in enumerate(data.get('scenes', ()), 1):
+                    if isinstance(raw, dict):
+                        env = str(raw.get('environment') or '').strip()
+                        light = str(raw.get('lighting') or '').strip()
+                        if env != bible.environment or light != bible.lighting:
+                            raise ValueError(
+                                f'DIRECTOR_SCENE_BIBLE_MISMATCH: scene {idx} environment {env!r} or lighting {light!r} does not match scene_bible ({bible.environment!r}, {bible.lighting!r})'
+                            )
             tuple_fields={'claim_refs','reference_asset_ids','product_identity_cues','required_visible_details',
                           'reference_requirements','forbidden_contact_regions'}
             scene_fields={f.name for f in fields(ScriptSceneV2)}
@@ -91,7 +152,8 @@ class VisualDirector:
             script=ScriptScenePlanV2.create(target_duration_seconds=data['target_duration_seconds'],
                 brief_digest=brief.digest(),scenes=tuple(scenes),prompt_version='four-agent-director-v1',
                 provenance=generator._provenance(result,prompt_version='four-agent-director-v1',
-                    input_digests=(dossier.digest(),brief.digest(),self.profile.digest,self.recipe['digest'])))
+                    input_digests=(dossier.digest(),brief.digest(),self.profile.digest,self.recipe['digest'])),
+                scene_bible=bible)
             validate_script(dossier, brief, script, allow_camera_motion=True)
             if not 16 <= script.target_duration_seconds <= 50:
                 raise ValueError('visual-only pilot requires 16–50 seconds before generation')
@@ -166,10 +228,20 @@ class VisualDirector:
             prompt += ('\nFor scripts with at least three scenes, bind an approved detail image to at least one '
                        'middle scene. Approved detail asset IDs: ' + ', '.join(sorted(detail_assets)) + '.')
         prompt += '\nAuthor placement, lighting, continuity_from_previous, continuity_to_next, identity cues, visible details, reference requirements, claim/asset IDs, and explicit END policy/omission reason in every scene. Missing intent is rejected, never filled by a generic template.'
+        if self.director_config_version == 'scene-bible-v1':
+            prompt += (
+                '\nSCENE BIBLE REQUIREMENTS:\n'
+                'Author one top-level "scene_bible" object with nonempty strings: environment, lighting, pov_hand, camera_baseline.\n'
+                'Every scene in "scenes" must have its environment and lighting exactly equal to the scene_bible fields.'
+            )
         if revision_feedback:
             prompt += '\nFinding-specific revision; keep logical scene IDs: ' + revision_feedback
+        script_schema = deepcopy(DIRECTOR_SCRIPT_SCHEMA)
+        if self.director_config_version == 'scene-bible-v1':
+            script_schema['properties']['scene_bible'] = SCENE_BIBLE_SCHEMA
+            script_schema['required'] = list(script_schema.get('required', [])) + ['scene_bible']
         return generator._generate(user_prompt=prompt, schema_name='script-scene-plan-v2',
-            json_schema=DIRECTOR_SCRIPT_SCHEMA, temperature=.3, parser=parse)
+            json_schema=script_schema, temperature=.3, parser=parse)
 
     def create_scene_prompts(self, dossier, script):
         result = self.port(dossier).generate_json(
@@ -200,6 +272,8 @@ class VisualDirector:
                 route_receipt=dict(result.route_receipt or {}), request_sent=True)
         try:
             bundle = ScenePromptBundle.from_dict(result.parsed)
+            if getattr(script, 'scene_bible', None):
+                bundle = bind_scene_bible(bundle, script.scene_bible)
             bundle=bind_identity_lock(bundle,dossier)
             bundle=replace(bundle,evaluator_receipt={'provider':result.provider,'model':result.model,
                 'route':dict(result.route_receipt or {}),'prompt_version':'visual-director-prompts-v1'})
@@ -278,3 +352,14 @@ def validate_bundle(bundle, script, profile, playbook_digest=None):
             raise ValueError('END prompt policy mismatch')
         if p.end_prompt and len(p.reference_asset_ids)+1>profile.max_reference_images:
             raise ValueError('END conditioning requires a reserved START reference slot')
+    bible = getattr(script, 'scene_bible', None)
+    if bible is not None:
+        for scene in script.scenes:
+            p = bundle.for_scene(scene.scene_id)
+            for raw_str in (bible.environment, bible.lighting, bible.pov_hand, bible.camera_baseline):
+                if raw_str not in p.start_prompt:
+                    raise ValueError(f'Scene bible string {raw_str!r} missing from start_prompt for {scene.scene_id}')
+                if raw_str not in p.video_prompt:
+                    raise ValueError(f'Scene bible string {raw_str!r} missing from video_prompt for {scene.scene_id}')
+                if p.end_prompt and raw_str not in p.end_prompt:
+                    raise ValueError(f'Scene bible string {raw_str!r} missing from end_prompt for {scene.scene_id}')

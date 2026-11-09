@@ -15,7 +15,7 @@ def preproduction_policy(config):
     threshold = config.get("preproduction_threshold", 80)
     if type(threshold) is not int or not 0 <= threshold <= 100:
         raise ValueError("preproduction_threshold must be an integer from 0 to 100")
-    return {"preproduction_gate": mode, "preproduction_threshold": threshold}
+    return {"preproduction_gate": mode, "preproduction_threshold": threshold, "rubric_version": "v2"}
 
 
 def normalize_qc_level(value=None):

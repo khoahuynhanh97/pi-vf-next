@@ -24,9 +24,14 @@ def preproduction_summary(artifact: dict) -> dict | None:
     review = current_preproduction_review(artifact)
     if review is None:
         return None
+    evaluator_receipt = getattr(review, "evaluator_receipt", None) or {}
+    rubric_version = evaluator_receipt.get("rubric_version", "v1")
+    director_config_version = evaluator_receipt.get("director_config_version", "legacy")
     return {
         "verdict": review.verdict, "input_digest": review.input_digest,
-        "total_tokens": review.evaluator_receipt.get("total_tokens"),
+        "total_tokens": evaluator_receipt.get("total_tokens"),
+        "rubric_version": rubric_version,
+        "director_config_version": director_config_version,
         **review.coverage.get("scorecard", {}),
     }
 
@@ -54,14 +59,20 @@ def _outcome_summary(outcome):
 def _collect_vf(result, db_path, products, costs):
     from video_factory.workflows.steps import read_pipeline_steps
 
-    selection_id = "pv-creative-batch-" + hashlib.sha256(result.run_id.encode()).hexdigest()[:24]
+    run_ids = [result.run_id, *(item["run_id"] for item in result.production_result.get("batches", []))]
     with closing(sqlite3.connect(db_path.resolve().as_uri() + "?mode=ro", uri=True)) as conn:
         conn.row_factory = sqlite3.Row
         tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
         if "workflow" not in tables:
             return
-        saved = conn.execute("SELECT aggregate_json FROM workflow WHERE workflow_id=?", (selection_id,)).fetchone()
-        selection = json.loads(saved[0]) if saved else {}
+        refs = {}
+        for run_id in run_ids:
+            selection_id = "pv-creative-batch-" + hashlib.sha256(run_id.encode()).hexdigest()[:24]
+            saved = conn.execute("SELECT aggregate_json FROM workflow WHERE workflow_id=?", (selection_id,)).fetchone()
+            if saved:
+                selection = json.loads(saved[0])
+                for key in ("prepared_refs", "resume_refs", "production_selected_refs"):
+                    refs.update(dict.fromkeys(selection.get(key, [])))
         outcomes = {item["workflow_id"]: item for item in result.product_outcomes if item.get("workflow_id")}
         unmatched = [item for item in result.product_outcomes if not item.get("workflow_id")]
         batch = result.intake_result.get("exchange_batch_dir")
@@ -70,28 +81,30 @@ def _collect_vf(result, db_path, products, costs):
         by_key = {item["product_key"]: item for item in manifest.get("products", []) if item.get("product_key")}
         for outcome in unmatched:
             source = by_key.get(outcome.get("product_key"))
-            product = next((item for item in products if source and source.get("candidate_id")
-                            and item.get("candidate_id") == source["candidate_id"]), None)
+            row_id = outcome.get("row_id")
+            candidate_id = outcome.get("candidate_id") or (source or {}).get("candidate_id")
+            product = next((item for item in products if
+                            (item.get("candidate_id") == candidate_id if candidate_id
+                             else row_id and item.get("row_id") == row_id)), None)
             if product is None and products and outcome.get("stage") in {"pi_intake", "exchange_admission"}:
                 continue  # The original PI rows carry the individual acquisition reasons.
             if product is None:
                 product = {"name": outcome.get("product_name"), "stages": {}}
                 products.append(product)
             product["outcome"] = _outcome_summary(outcome)
-        refs = dict.fromkeys([*selection.get("prepared_refs", []), *selection.get("resume_refs", []),
-                              *selection.get("production_selected_refs", []), *outcomes])
+        refs.update(dict.fromkeys(outcomes))
         for workflow_id in refs:
             row = conn.execute("SELECT aggregate_json FROM workflow WHERE workflow_id=?", (workflow_id,)).fetchone()
             if row is None:
                 continue
             workflow = json.loads(row[0])
             source = workflow.get("source_context") or {}
-            candidate_id = (source.get("creative_input") or {}).get("candidate_id")
             row_id = source.get("source_product_id")
             outcome = outcomes.pop(workflow_id, {})
+            candidate_id = outcome.get("candidate_id") or (source.get("creative_input") or {}).get("candidate_id")
             product = next((item for item in products if
-                            (candidate_id and item.get("candidate_id") == candidate_id)
-                            or (row_id and item.get("row_id") == row_id)), None)
+                            (item.get("candidate_id") == candidate_id if candidate_id
+                             else row_id and item.get("row_id") == row_id)), None)
             if product is None:
                 product = {"name": source.get("name") or outcome.get("product_name") or workflow_id, "stages": {}}
                 products.append(product)
@@ -115,6 +128,33 @@ def _collect_vf(result, db_path, products, costs):
                 ).fetchone()[0]
             product.update(workflow_id=workflow_id, vf_state=workflow.get("state"),
                            preproduction=preproduction_summary(scene), repair_count=repair_count)
+            scene_provider_kinds = []
+            if {"video_factory_scene_operation", "video_factory_render_batches"} <= tables:
+                try:
+                    query = (
+                        "SELECT s.scene_id, s.provider_kind, s.attempt, s.status "
+                        "FROM video_factory_scene_operation AS s "
+                        "JOIN video_factory_render_batches AS b "
+                        "ON b.render_batch_id = s.render_batch_id "
+                        "AND b.project_id = s.project_id "
+                        "AND b.owner_user_id = s.owner_user_id "
+                        "WHERE b.workflow_id = ? "
+                        "AND s.provider_kind IN ('google_flow', 'vertex_ai') "
+                        "AND (s.submitted_at IS NOT NULL OR COALESCE(s.provider_operation_id, '') <> '') "
+                        "ORDER BY s.scene_order, s.submitted_at, s.attempt, s.operation_id"
+                    )
+                    for row in conn.execute(query, (workflow_id,)):
+                        record = {
+                            "scene_id": row[0],
+                            "provider_kind": row[1],
+                            "attempt": row[2],
+                            "status": row[3],
+                        }
+                        if record not in scene_provider_kinds:
+                            scene_provider_kinds.append(record)
+                except sqlite3.Error:
+                    pass
+            product["scene_provider_kinds"] = scene_provider_kinds
             if outcome:
                 product["outcome"] = _outcome_summary(outcome)
             if result.provider_mode == "configured":
@@ -160,8 +200,9 @@ def write_daily_report(result, *, db_path=VF_DB_PATH, root=RUNTIME_DIR / "report
     key = f"{result.provider_mode}:{result.run_id}"
     intake = result.intake_result
     intake_dir = intake.get("intake_run_dir") or intake.get("run_dir")
+    intake_dirs = intake.get("run_dirs") or ([intake_dir] if intake_dir else [])
     products, costs, errors = [], {}, [_safe_log_text(error, 500) for error in result.inspection_errors]
-    if intake_dir:
+    for intake_dir in intake_dirs:
         try:
             state = json.loads((Path(intake_dir) / "intake.json").read_text(encoding="utf-8"))
             for row in state["rows"]:
@@ -190,7 +231,7 @@ def write_daily_report(result, *, db_path=VF_DB_PATH, root=RUNTIME_DIR / "report
     report["cost"] = {
         "recorded_usd": round(sum(daily_costs.values()), 6),
         "complete": not any(item["provider_mode"] == "configured" for item in report["runs"].values()),
-        "scope": "Recorded receipts for runs of this production date. Unreported provider spend is excluded.",
+        "scope": "receipt_only: recorded receipts for runs of this production date. Unreported provider spend is excluded.",
     }
     atomic_json(path, report)
     if run != previous and result.provider_mode == "configured" and result.status in {"success", "partial", "failed"}:

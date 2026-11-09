@@ -12,6 +12,8 @@ from enum import StrEnum
 from pathlib import Path
 from urllib.parse import urlsplit
 
+from tools.selection_handoff import MAX_SHEET_SELECTION
+
 from .intake_parser import parse_input
 from .links import direct_product_url
 from .storage import atomic_json, digest, item_key, now, read_json
@@ -143,7 +145,7 @@ def _validate_handoff(source: Path, handoff_path: Path | None) -> dict:
             raise ValueError("Handoff selected CSV schema mismatch.")
         rows = list(reader)
     count = data.get("selected_count")
-    if not isinstance(count, int) or count != len(rows) or count > 15:
+    if not isinstance(count, int) or count != len(rows) or count > MAX_SHEET_SELECTION:
         raise ValueError("Handoff selected count mismatch.")
     candidates, ranks = set(), []
     for row in rows:

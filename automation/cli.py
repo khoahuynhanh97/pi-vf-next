@@ -16,6 +16,7 @@ if hasattr(sys.stderr, "reconfigure"):
 
 from automation.config import (
     BANGKOK_TZ,
+    DAILY_VIDEO_LIMIT,
     DEFAULT_PROFILE,
     INBOX_ROOT,
     PI_DIR,
@@ -110,6 +111,13 @@ def cmd_run(args: argparse.Namespace) -> int:
     record_run(record)
     report_configured_run(res, db_path=args.db_path or VF_DB_PATH)
 
+    if res.status not in ("success", "skipped"):
+        try:
+            from automation.doctor_agent import DoctorAgent
+            DoctorAgent().handle_pipeline_incident(res)
+        except Exception as doctor_exc:
+            pass
+
     if args.json:
         print("\n" + json.dumps(asdict(res), indent=2, ensure_ascii=False))
 
@@ -132,6 +140,13 @@ def cmd_resume(args: argparse.Namespace) -> int:
         qc_level=args.qc_level,
     )
     report_configured_run(res, db_path=args.db_path or VF_DB_PATH)
+
+    if res.status not in ("success", "skipped"):
+        try:
+            from automation.doctor_agent import DoctorAgent
+            DoctorAgent().handle_pipeline_incident(res)
+        except Exception as doctor_exc:
+            pass
     print(f"Status: {res.status}")
     if res.error:
         print(f"Note/Error: {res.error}")
@@ -286,21 +301,60 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     print("\n[5] Timezone:")
     print(f"  [OK] Asia/Bangkok Current Time: {now_bangkok().strftime('%Y-%m-%d %H:%M:%S %Z')}")
 
+    # 6. Pipeline Health & Workflows
+    from automation.doctor_agent import DoctorAgent
+    doctor = DoctorAgent()
+    target_date = getattr(args, 'date', None)
+    diag = doctor.diagnose(day=target_date)
+
+    print("\n[6] Pipeline Health & Workflows:")
+    print(f"  Target Date:     {diag.date}")
+    print(f"  Status:          {'HEALTHY' if diag.healthy else 'ATTENTION REQUIRED'}")
+    print(f"  MP4s Completed:  {diag.mp4_count_today}")
+    if diag.findings:
+        print(f"  Findings:        {len(diag.findings)}")
+        for f in diag.findings:
+            icon = {'CRITICAL': '⛔', 'ERROR': '❌', 'WARNING': '⚠️', 'INFO': 'ℹ️'}.get(f.severity, '•')
+            print(f"    {icon} [{f.severity}] [{f.component}] {f.title}")
+            if f.action_suggested:
+                print(f"        -> Action: {f.action_suggested}")
+
+    if getattr(args, 'fix', False):
+        print("\n=== Executing Doctor Auto-Repair ===")
+        fixes = doctor.auto_repair(diag)
+        if fixes:
+            for fix in fixes:
+                print(f"  [FIXED] {fix}")
+        else:
+            print("  Không có lỗi tự động sửa nào cần can thiệp.")
+
+    if getattr(args, 'notify', False):
+        print("\n=== Sending Telegram Alert ===")
+        doctor.send_telegram_alert(
+            diag,
+            custom_message=getattr(args, 'message', None),
+            attach_report=getattr(args, 'attach_report', False),
+        )
+
     print("\n" + "=" * 30)
-    if issues == 0:
+    if issues == 0 and diag.healthy:
         print("Doctor Verdict: ALL CHECKS PASSED (Ready for production & offline verification)")
         return 0
+    elif issues == 0 and not diag.healthy:
+        print(f"Doctor Verdict: ENVIRONMENT OK, BUT PIPELINE HAS {len([f for f in diag.findings if f.severity in ('ERROR', 'CRITICAL')])} BLOCKING ISSUE(S)")
+        return 1
     else:
-        print(f"Doctor Verdict: {issues} ISSUE(S) DETECTED")
+        print(f"Doctor Verdict: {issues} ENVIRONMENT ISSUE(S) DETECTED")
         return 1
 
 
 def cmd_trigger(args: argparse.Namespace) -> int:
     """Trigger daily scheduler check or daemon."""
+    limit = args.limit if args.limit is not None else (DAILY_VIDEO_LIMIT if args.csv is None else 1)
     if args.daemon:
         run_scheduler_daemon(
             spark_csv=args.csv,
-            limit=args.limit,
+            limit=limit,
             scenes=args.scenes,
             provider_mode=args.provider_mode,
             qc_level=args.qc_level,
@@ -311,7 +365,7 @@ def cmd_trigger(args: argparse.Namespace) -> int:
 
     res = trigger_daily_run(
         spark_csv=args.csv,
-        limit=args.limit,
+        limit=limit,
         scenes=args.scenes,
         provider_mode=args.provider_mode,
         force=args.force,
@@ -378,17 +432,23 @@ def main(argv: list[str] | None = None) -> int:
     p_find.set_defaults(func=cmd_find_mp4)
 
     # doctor
-    p_doctor = subparsers.add_parser("doctor", help="Run environment and system diagnostics")
+    p_doctor = subparsers.add_parser("doctor", help="Run environment and system diagnostics, auto-repair and notify")
+    p_doctor.add_argument("--fix", action="store_true", help="Auto-repair fixable pipeline issues")
+    p_doctor.add_argument("--notify", action="store_true", help="Send doctor report to Telegram")
+    p_doctor.add_argument("--attach-report", action="store_true", help="Attach daily report JSON to Telegram")
+    p_doctor.add_argument("--message", help="Custom note to include in Telegram alert")
+    p_doctor.add_argument("--date", help="Target date YYYY-MM-DD (defaults to today)")
     p_doctor.set_defaults(func=cmd_doctor)
 
     # trigger
     p_trigger = subparsers.add_parser("trigger", help="Trigger daily scheduled run or run scheduler daemon")
     p_trigger.add_argument("--csv", type=Path, help="Explicit CSV override for offline verification")
-    p_trigger.add_argument("--limit", type=int, default=1)
+    p_trigger.add_argument("--limit", type=int,
+                           help=f"Maximum products for this run (Sheets default {DAILY_VIDEO_LIMIT}, CSV default 1)")
     p_trigger.add_argument("--scenes", type=int, choices=(3, 4, 5), default=4)
     p_trigger.add_argument("--date")
     p_trigger.add_argument("--provider-mode", choices=("fake", "configured"))
-    p_trigger.add_argument("--qc-level", choices=("low", "middle", "high"), default="high")
+    p_trigger.add_argument("--qc-level", choices=("low", "middle", "high"), default="low")
     p_trigger.add_argument("--acquire", action="store_true", help="Use Spaiauto to collect and review the selected Sheet product")
     p_trigger.add_argument("--force", action="store_true", help="Force execution even if already run today")
     p_trigger.add_argument("--daemon", action="store_true", help="Run foreground scheduler daemon")
@@ -408,6 +468,7 @@ def main(argv: list[str] | None = None) -> int:
     p_compare.add_argument("--exports-root", type=Path, default=VF_EXPORTS_DIR)
     p_compare.add_argument("--db-path", type=Path, default=VF_DB_PATH)
     p_compare.add_argument("--threshold", type=int, default=80, help="Preproduction QC threshold (0–100, default 80)")
+    p_compare.add_argument("--rubric-version", choices=("v1", "v2", "unknown"), help="Filter rows by rubric version")
     p_compare.set_defaults(func=cmd_compare_qc)
 
     args = parser.parse_args(argv)

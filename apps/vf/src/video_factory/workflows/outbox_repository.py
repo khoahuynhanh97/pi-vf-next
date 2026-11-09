@@ -109,6 +109,8 @@ class OutboxRepository:
         work.  If no transaction is active, claim() opens BEGIN IMMEDIATE and
         commits/rollbacks at the end.
         """
+        if workflow_ids == []:
+            return []
         now = _now_iso(now_iso)
         claims: list[OutboxClaim] = []
 
@@ -126,8 +128,6 @@ class OutboxRepository:
             target_clause = ""
             params: list[object] = [now, now]
             if workflow_ids is not None:
-                if not workflow_ids:
-                    return []
                 placeholders = ",".join("?" for _ in workflow_ids)
                 target_clause = f" AND workflow_id IN ({placeholders})"
                 params.extend(workflow_ids)

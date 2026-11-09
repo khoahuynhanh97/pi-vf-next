@@ -1,0 +1,204 @@
+<!doctype html>
+<html lang="vi">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Quy trình PI/VF từ Google Sheets đến video</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --ink: #152b2d;
+      --muted: #43595a;
+      --line: #d0ddda;
+      --pi: #13624e;
+      --handoff: #79481c;
+      --vf: #264f9e;
+      --human: #694487;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      background: #f3f7f6;
+      color: var(--ink);
+      font: 1rem/1.6 system-ui, sans-serif;
+    }
+    main { max-width: 58rem; margin: auto; padding: 2.5rem 1.25rem 3rem; }
+    header {
+      padding: clamp(1.3rem, 5vw, 2.5rem);
+      border-radius: 1rem;
+      background: #143d3b;
+      color: #fff;
+    }
+    h1, h2, h3 { line-height: 1.2; }
+    h1 { margin: .45rem 0 .75rem; font-size: clamp(1.9rem, 5vw, 3.1rem); }
+    h2 { margin: 0 0 .65rem; font-size: 1.4rem; }
+    h3 { margin: 0 0 .35rem; font-size: 1.12rem; }
+    p { margin: .4rem 0; }
+    .eyebrow, .tag { font-size: .8rem; font-weight: 700; letter-spacing: .045em; }
+    .eyebrow { color: #d5f5e8; text-transform: uppercase; }
+    .route { color: #d5f5e8; font-weight: 650; margin-top: .95rem; }
+    .section { margin-top: 1.75rem; }
+    .steps { list-style: none; margin: 0; padding: 0; }
+    .steps > li {
+      --lane: var(--pi);
+      position: relative;
+      margin: 0 0 .65rem 1.05rem;
+      padding: 0 0 .65rem 1.55rem;
+      border-left: 2px solid var(--line);
+    }
+    .steps > li:last-child { border-color: transparent; margin-bottom: 0; padding-bottom: 0; }
+    .steps > .handoff { --lane: var(--handoff); }
+    .steps > .vf { --lane: var(--vf); }
+    .steps > .human { --lane: var(--human); }
+    .step-number {
+      position: absolute;
+      left: -1.05rem;
+      top: .8rem;
+      display: grid;
+      place-items: center;
+      width: 2rem;
+      height: 2rem;
+      border-radius: 50%;
+      color: #fff;
+      background: var(--lane);
+      font-weight: 700;
+    }
+    .card, aside, details {
+      background: #fff;
+      border: 1px solid var(--line);
+      border-radius: .75rem;
+      padding: .95rem 1.15rem;
+    }
+    .tag { display: block; color: var(--lane); margin-bottom: .25rem; }
+    .output { color: var(--muted); font-size: .9rem; }
+    .notes { padding-left: 1.2rem; margin: .5rem 0 0; }
+    .notes li + li { margin-top: .55rem; }
+    code { font-size: .9em; overflow-wrap: anywhere; }
+    pre {
+      margin: .65rem 0 0;
+      padding: .65rem .8rem;
+      background: #eef4f3;
+      border-radius: .35rem;
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
+    }
+    summary { cursor: pointer; font-weight: 700; }
+    a { color: #264f9e; }
+    :focus-visible { outline: 3px solid #264f9e; outline-offset: 3px; }
+    @media (max-width: 430px) {
+      main { padding: 1rem .8rem 2rem; }
+      .steps > li { padding-left: 1.25rem; }
+      .card, aside, details { padding: .85rem; }
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <header>
+      <p class="eyebrow">Luồng chạy hằng ngày · PI/VF</p>
+      <h1>Từ Google Sheets đến video</h1>
+      <p>PI (Product Intelligence) chọn sản phẩm và chuẩn bị ảnh. VF (Video Factory) dùng ảnh đó để tạo kịch bản, dựng và kiểm video.</p>
+      <p class="route">Google Sheets → Spaiauto ZIP → ảnh local → VF → MP4 → bạn duyệt</p>
+    </header>
+
+    <section class="section" aria-labelledby="flow-title">
+      <h2 id="flow-title">Từng bước</h2>
+      <ol class="steps" role="list">
+        <li>
+          <span class="step-number" aria-hidden="true">1</span>
+          <article class="card">
+            <span class="tag">PI · AI chọn sản phẩm</span>
+            <h3>Đọc hai Google Sheets và chốt danh sách ngày</h3>
+            <p>Scheduler hoặc lệnh <code>Run.ps1 trigger</code> khởi động luồng. PI gộp dữ liệu từ hai Sheet, rồi AI chọn các sản phẩm từ những dòng <code>OPEN</code>. Chạy lại cùng ngày dùng danh sách đã lưu.</p>
+            <p class="output"><strong>Kết quả:</strong> <code>selection.json</code> và <code>selected_products.csv</code>.</p>
+          </article>
+        </li>
+        <li>
+          <span class="step-number" aria-hidden="true">2</span>
+          <article class="card">
+            <span class="tag">PI · Spaiauto</span>
+            <h3>Mở link sản phẩm và tải ZIP ảnh</h3>
+            <p>PI mở lần lượt từng link sản phẩm đã chọn. Spaiauto tải ZIP ảnh từ trang đó. PI cũng lưu thông tin trang như tiêu đề, mô tả, biến thể và ảnh chụp màn hình.</p>
+            <p class="output"><strong>Kết quả:</strong> một ZIP và thông tin trang cho từng lượt thu thập.</p>
+          </article>
+        </li>
+        <li>
+          <span class="step-number" aria-hidden="true">3</span>
+          <article class="card">
+            <span class="tag">PI · Xử lý file</span>
+            <h3>Giải nén ảnh ra thư mục local rồi xóa ZIP</h3>
+            <p>PI lọc file ảnh hỏng hoặc trùng. Sau khi lưu được ảnh dùng được và biên nhận import, PI xóa ZIP. Nếu import thất bại, ZIP được giữ lại.</p>
+            <p class="output"><strong>Kết quả:</strong> file ảnh local và một ảnh ghép để AI xem. Ảnh tham chiếu đi tiếp theo đường dẫn file.</p>
+          </article>
+        </li>
+        <li>
+          <span class="step-number" aria-hidden="true">4</span>
+          <article class="card">
+            <span class="tag">PI · AI duyệt ảnh</span>
+            <h3>Xem ảnh đã giải nén và chọn 1–5 ảnh</h3>
+            <p>AI xem ảnh ghép cùng thông tin trang để chọn ảnh phù hợp với sản phẩm và biến thể. Bước này dùng ảnh trong ZIP đã giải nén, không tải lại từng URL ảnh.</p>
+            <p class="output"><strong>Kết quả:</strong> bộ ảnh được chọn hoặc lý do bỏ qua trong <code>intake.json</code>.</p>
+          </article>
+        </li>
+        <li class="handoff">
+          <span class="step-number" aria-hidden="true">5</span>
+          <article class="card">
+            <span class="tag">Exchange · Bàn giao</span>
+            <h3>PI giao bộ ảnh đã duyệt cho VF</h3>
+            <p>PI đóng gói thông tin sản phẩm, đường dẫn ảnh trong gói và mã kiểm tra file. Cờ <code>READY</code> báo cho VF biết gói đã sẵn sàng.</p>
+            <p class="output"><strong>Kết quả:</strong> gói dưới <code>runtime/exchange/inbox/</code>.</p>
+          </article>
+        </li>
+        <li class="vf">
+          <span class="step-number" aria-hidden="true">6</span>
+          <article class="card">
+            <span class="tag">VF · AI lập nội dung</span>
+            <h3>Tạo kịch bản, chia cảnh và viết prompt</h3>
+            <p>Mỗi sản phẩm có một workflow VF riêng. AI tạo kế hoạch cảnh và prompt từ thông tin và ảnh sản phẩm. Critic chấm tiền kỳ ở chế độ <code>observe</code>, nên điểm và verdict được lưu để theo dõi.</p>
+            <p class="output"><strong>Kết quả:</strong> kịch bản, prompt cho từng cảnh và bản đánh giá tiền kỳ.</p>
+          </article>
+        </li>
+        <li class="vf">
+          <span class="step-number" aria-hidden="true">7</span>
+          <article class="card">
+            <span class="tag">VF · Dựng và kiểm video</span>
+            <h3>Tạo storyboard, render, kiểm QC và xuất MP4</h3>
+            <p>VF tạo ảnh khung cho storyboard, dựng clip từng cảnh và ghép thành video. Ở mức <code>high</code>, VF kiểm nội dung các clip và video cuối, đồng thời kiểm kỹ thuật trước khi xuất.</p>
+            <p class="output"><strong>Kết quả:</strong> <code>final.mp4</code>, <code>caption.txt</code> và <code>metadata.json</code> dưới <code>runtime/vf/workspace/exports/</code>.</p>
+          </article>
+        </li>
+        <li class="human">
+          <span class="step-number" aria-hidden="true">8</span>
+          <article class="card">
+            <span class="tag">Bạn · Duyệt đầu ra</span>
+            <h3>Xem video và ghi quyết định duyệt</h3>
+            <p>Xem <code>final.mp4</code>, rồi dùng <code>human-verdict</code> để lưu quyết định và lý do. Dùng <code>compare-qc</code> để đối chiếu quyết định của bạn với điểm tiền kỳ.</p>
+            <p class="output"><strong>Kết quả:</strong> <code>human_verdict.json</code> cạnh video đã xuất.</p>
+          </article>
+        </li>
+      </ol>
+    </section>
+
+    <aside class="section" aria-labelledby="notes-title">
+      <h2 id="notes-title">Theo dõi một lượt chạy</h2>
+      <ul class="notes">
+        <li><strong>Tham số:</strong> <code>--limit 4</code> giới hạn số sản phẩm được chọn, <code>--scenes 4</code> giới hạn số cảnh mỗi video. Số video xuất được phụ thuộc vào kết quả thu thập và QC.</li>
+        <li><strong>Ảnh bị bỏ qua:</strong> mở <code>intake.json</code> để xem sản phẩm và <code>reason_code</code>. Nếu còn sản phẩm chờ xử lý hoặc cả lô chưa có sản phẩm hoàn tất, PI chưa giao gói <code>READY</code>.</li>
+        <li><strong>Báo cáo ngày:</strong> mở <code>runtime/reports/YYYY-MM-DD.json</code> để xem tiến độ, lý do bỏ qua, điểm tiền kỳ và chi phí đã ghi nhận.</li>
+      </ul>
+    </aside>
+
+    <details class="section">
+      <summary>Lệnh chạy và file tham chiếu</summary>
+      <p>Ví dụ lệnh chạy tay từ thư mục gốc project.</p>
+      <pre><code>.\Run.ps1 trigger --acquire --limit 4 --scenes 4 --qc-level high</code></pre>
+      <ul class="notes">
+        <li>Khởi động và chọn sản phẩm: <a href="../Run.ps1"><code>Run.ps1</code></a>, <a href="../automation/scheduler/daily_trigger.py"><code>daily_trigger.py</code></a>, <a href="../apps/pi/tools/sheet_daily.py"><code>sheet_daily.py</code></a>.</li>
+        <li>Tải, nhập và duyệt ảnh: <a href="../apps/pi/tools/spaiauto/scheduled.py"><code>spaiauto/scheduled.py</code></a>, <a href="../apps/pi/tools/spaiauto/importer.py"><code>spaiauto/importer.py</code></a>.</li>
+        <li>Bàn giao và chạy VF: <a href="../automation/pipelines/spark_pipeline.py"><code>spark_pipeline.py</code></a>, <a href="../apps/vf/src/video_factory/automation/creative_cli.py"><code>creative_cli.py</code></a>, <a href="../apps/vf/src/video_factory/automation/creative_policy.py"><code>creative_policy.py</code></a>.</li>
+        <li>Báo cáo và duyệt video: <a href="../automation/daily_report.py"><code>daily_report.py</code></a>, <a href="../automation/cli.py"><code>automation/cli.py</code></a>.</li>
+      </ul>
+    </details>
+  </main>
+</body>
+</html>

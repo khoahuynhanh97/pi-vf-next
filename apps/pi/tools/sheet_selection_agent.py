@@ -14,6 +14,7 @@ import httpx
 from dotenv import load_dotenv
 
 from tools.spaiauto.storage import atomic_json
+from tools.selection_handoff import MAX_SHEET_SELECTION
 
 
 def _local_router_key() -> str:
@@ -60,8 +61,8 @@ def _complete(messages: list[dict], *, model: str | None = None) -> dict:
 
 def select_from_pool(rows: list[dict], *, complete=_complete, limit: int = 15,
                      candidate_limit: int | None = None) -> dict:
-    if not 1 <= limit <= 15:
-        raise ValueError("Selection limit must be 1..15")
+    if not 1 <= limit <= MAX_SHEET_SELECTION:
+        raise ValueError(f"Selection limit must be 1..{MAX_SHEET_SELECTION}")
     open_rows = [r for r in rows if r.get("state") == "OPEN"]
     if candidate_limit is not None:
         if candidate_limit < 1:
@@ -102,7 +103,7 @@ def select_from_pool(rows: list[dict], *, complete=_complete, limit: int = 15,
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Propose up to 15 products from OPEN Sheet candidates")
+    parser = argparse.ArgumentParser(description=f"Propose up to {MAX_SHEET_SELECTION} products from OPEN Sheet candidates")
     parser.add_argument("--pool", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--limit", type=int, default=15)

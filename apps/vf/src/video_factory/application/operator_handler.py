@@ -1882,18 +1882,25 @@ def recover_unknown_keyframe_submission(
     operation_id: str,
     authorization: dict[str, Any] | None = None,
     expected_version: int | None = None,
+    replacement_note: str | None = None,
 ) -> dict[str, Any]:
     """Reconcile an unknown call or replace a proven pre-Send failure for one frame."""
     import hashlib
-    from video_factory.integrations.keyframe_provider import KeyframeOperationStore
+    from video_factory.integrations.keyframe_provider import (
+        MAX_OUTPUT_RECONCILIATION_ATTEMPTS, KeyframeOperationStore, _stable_request_digest,
+    )
     from video_factory.integrations.keyframe_provider_factory import (
         resolve_keyframe_provider,
     )
-    from video_factory.integrations.capacity import ProviderCapacityStore
+    from video_factory.integrations.capacity import ProviderCapacityStore, process_lease_owner_alive
     from video_factory.qc.retry_policy import ensure_qc_retry_schema
     from video_factory.creative.contracts import ResearchDossier, ScriptScenePlanV2
     from video_factory.creative.storyboard import (
+        bind_recovery_reference_revisions,
         compile_keyframe_requests,
+        plan_initial_storyboard_recovery,
+        prepare_keyframe_generation_request,
+        resolve_reusable_storyboard_frames,
         storyboard_package_digest,
     )
     from video_factory.storage.layout import get_workspace_layout
@@ -1963,8 +1970,10 @@ def recover_unknown_keyframe_submission(
     if not uncertain_submission and not confirmed_presend_failure and not known_invalid_output:
         raise ValueError("Quarantined storyboard job has neither an unknown submission, a verified invalid Flow image, nor a recognized pre-Send Flow selector failure")
     envelope = json.loads(row["message"])
-    if envelope.get("payload", {}).get("job_name") != "product_video.storyboard":
+    job_payload = envelope.get("payload", {})
+    if job_payload.get("job_name") != "product_video.storyboard":
         raise ValueError("Quarantined job is not storyboard generation")
+    job_kwargs = job_payload.get("kwargs") or {}
 
     scene_ref = aggregate.get("scene_plan")
     if not isinstance(scene_ref, dict) or not isinstance(scene_ref.get("research_dossier"), dict):
@@ -1977,33 +1986,71 @@ def recover_unknown_keyframe_submission(
 
         prompt_bundle = ScenePromptBundle.from_dict(scene_ref["scene_prompts"])
         backend_profile = BackendProfile.from_dict(scene_ref["backend_profile"])
-    requests = compile_keyframe_requests(
+    recovery_plan = job_kwargs.get("recovery_plan", aggregate.get("keyframe_recovery_plan"))
+    if not isinstance(recovery_plan, dict):
+        recovery_plan = None
+    if recovery_plan and prompt_bundle is not None:
+        recovery_plan = bind_recovery_reference_revisions(
+            recovery_plan, script=script, prompt_bundle=prompt_bundle, dossier=dossier,
+        )
+    previous_package = job_kwargs.get("previous_storyboard")
+    if not isinstance(previous_package, dict):
+        previous_package = None
+    request_inputs = dict(
         workflow_id=workflow_id,
         project_id=str(aggregate["project_id"]),
         dossier=dossier,
         script=script,
         prompt_bundle=prompt_bundle,
         backend_profile=backend_profile,
-        recovery_plan=(
-            aggregate.get("keyframe_recovery_plan")
-            if isinstance(aggregate.get("keyframe_recovery_plan"), dict)
-            else None
-        ),
-        recovery_attempt=int(aggregate.get("keyframe_recovery_attempt", 0) or 0),
+        recovery_plan=recovery_plan,
+        recovery_attempt=int(job_kwargs.get("recovery_attempt", aggregate.get("keyframe_recovery_attempt")) or 0),
+        previous_package=previous_package,
     )
+    requests = compile_keyframe_requests(**request_inputs)
     by_operation = {request.operation_id: request for request in requests}
-    if target_op_id not in by_operation:
+    omitted_legacy_end = target_op_id not in by_operation
+    if omitted_legacy_end:
+        # Older workers could have sent an END during START recovery even when omitted.
+        requests = compile_keyframe_requests(**request_inputs, legacy_implicit_end_recovery=True)
+        by_operation = {request.operation_id: request for request in requests}
+    if target_op_id not in by_operation or (omitted_legacy_end and by_operation[target_op_id].frame_role != "end"):
         raise ValueError(f"Operation '{target_op_id}' does not belong to the approved Scene Plan")
 
     rows = connection.execute(
         "SELECT operation_id, provider_operation_id, provider_kind, status, error_code, error_message, "
-        "provider_metadata_json, output_path, output_sha256 FROM video_factory_keyframe_operation "
+        "provider_metadata_json, output_path, output_sha256, updated_at, request_digest "
+        "FROM video_factory_keyframe_operation "
         "WHERE workflow_id = ? AND operation_id = ?",
         (workflow_id, target_op_id),
     ).fetchall()
     if not rows:
         raise ValueError(f"Operation '{target_op_id}' does not exist in this workflow")
     target_row = rows[0]
+    abandonment = None
+    if replacement_note is not None:
+        note = replacement_note.strip()
+        if not note or len(note) > 1000:
+            raise ValueError("A replacement note of 1–1000 characters is required")
+        metadata = json.loads(target_row["provider_metadata_json"] or "{}")
+        attempts = metadata.get("output_reconciliation_attempts")
+        finished = metadata.get("output_reconciliation_finished_attempt") == attempts
+        if not finished and metadata.get("output_reconciliation_last_attempt_at"):
+            # Earlier poll receipts recorded the claim time and saved the result separately.
+            last_claim = datetime.fromisoformat(metadata["output_reconciliation_last_attempt_at"])
+            saved_at = datetime.fromisoformat(target_row["updated_at"]).replace(tzinfo=timezone.utc)
+            finished = saved_at > last_claim
+        if (not uncertain_submission or target_row["provider_kind"] != "google_flow"
+                or target_row["status"] != "unknown" or target_row["output_path"]
+                or not target_row["provider_operation_id"] or metadata.get("send_attempted") is not True
+                or target_row["error_code"] != "GOOGLE_FLOW_OUTPUT_NOT_RETRIEVED"
+                or type(attempts) is not int or attempts < MAX_OUTPUT_RECONCILIATION_ATTEMPTS or not finished):
+            raise ValueError("An unknown Flow operation with no output and an exhausted poll budget is required")
+        abandonment = {
+            "note": note, "provider_outcome": "unknown", "output_reconciliation_attempts": attempts,
+            "provider_operation_id": target_row["provider_operation_id"],
+            "abandoned_at": datetime.now(timezone.utc).isoformat(),
+        }
     presend_proven = False
     invalid_output_proven = False
     if confirmed_presend_failure:
@@ -2092,7 +2139,33 @@ def recover_unknown_keyframe_submission(
             op_completed = True
     if target_row["status"] == "completed" and not op_completed:
         raise ValueError(f"Completed operation '{target_op_id}' has no integrity-verified output")
-    if not op_completed and not presend_proven and not invalid_output_proven:
+    if not op_completed and not presend_proven and not invalid_output_proven and abandonment is None:
+        recovery_frame_ids, feedback = plan_initial_storyboard_recovery(recovery_plan)
+        start_path = ""
+        if target_request.frame_role == "end":
+            scene_id = target_request.frame_id.removesuffix("-end")
+            start_request = next(request for request in requests if request.frame_id == f"{scene_id}-start")
+            reusable_scenes, prior_frames = resolve_reusable_storyboard_frames(
+                previous_package, workflow_id=workflow_id, project_id=str(aggregate["project_id"]), script=script,
+            )
+            previous_start = prior_frames.get(start_request.frame_id)
+            if previous_start and scene_id in reusable_scenes and start_request.frame_id not in recovery_frame_ids:
+                start_path = str(previous_start.get("image_path") or "")
+                start_sha = previous_start.get("sha256")
+            else:
+                start = store.get(start_request.operation_id)
+                if not start or start["status"] != "completed":
+                    raise ValueError("END keyframe requires its completed START frame")
+                start_path = str(start["output_path"] or "")
+                start_sha = start["output_sha256"]
+            path = Path(start_path)
+            if not path.is_file() or hashlib.sha256(path.read_bytes()).hexdigest() != start_sha:
+                raise ValueError("END keyframe START conditioning image changed")
+        target_request = prepare_keyframe_generation_request(
+            target_request, feedback=feedback.get(target_request.frame_id, ""), conditioning_start_path=start_path,
+        )
+        if _stable_request_digest(target_request) != target_row["request_digest"]:
+            raise ValueError("Quarantined keyframe request does not match the submitted request digest")
         reconcile_output = getattr(provider, "reconcile_existing_output", None)
         result = (
             reconcile_output(target_request, provider_id)
@@ -2294,7 +2367,46 @@ def recover_unknown_keyframe_submission(
         "actions": ["regenerate_keyframe"],
         "feedback": recovery_feedback,
     }
-    plan = {"frames": existing_frames + [new_frame]}
+    plan = {"frames": existing_frames if omitted_legacy_end else existing_frames + [new_frame]}
+
+    def retire_previous_operation(capacity):
+        if abandonment is not None:
+            updated = connection.execute(
+                """UPDATE video_factory_keyframe_operation
+                   SET status='abandoned_unknown', error_code='OPERATOR_REPLACED_UNRETRIEVABLE_OUTPUT',
+                       error_message=?, provider_metadata_json=?, updated_at=CURRENT_TIMESTAMP
+                   WHERE operation_id=? AND workflow_id=? AND provider_operation_id=?
+                     AND status='unknown' AND COALESCE(output_path,'')='' AND error_code=?
+                     AND provider_metadata_json=?""",
+                (abandonment["note"], json.dumps({**metadata, "operator_abandonment": abandonment}),
+                 target_op_id, workflow_id, provider_id, target_row["error_code"], target_row["provider_metadata_json"]),
+            )
+            if updated.rowcount != 1:
+                raise ValueError("The Flow operation changed before replacement")
+            slot = connection.execute(
+                "SELECT provider_operation_id, lease_owner, lease_expires_at "
+                "FROM video_factory_provider_capacity WHERE provider_kind=? AND operation_id=?",
+                (provider_kind, target_op_id),
+            ).fetchone()
+            if slot is None or slot["provider_operation_id"] != provider_id:
+                raise ValueError("Provider capacity slot is missing or bound to a different operation")
+            if (slot["lease_expires_at"] > datetime.now(timezone.utc).timestamp()
+                    or process_lease_owner_alive(slot["lease_owner"])):
+                raise ValueError("The old Flow operation still has an active lease")
+            connection.execute(
+                """UPDATE workflow_qc_retries SET status='abandoned_unknown',
+                   action_taken='operator_abandoned_unretrievable_output', reason_text=?, updated_at=?
+                   WHERE workflow_id=? AND operation_id=? AND retry_type='four_agent_image_send'
+                     AND status='technical_unknown'""",
+                (abandonment["note"], now, workflow_id, target_op_id),
+            )
+        elif not invalid_output_proven:
+            connection.execute(
+                "UPDATE video_factory_keyframe_operation SET status='failed', "
+                "error_code='REPLACED_AFTER_UNKNOWN_OUTCOME', updated_at=CURRENT_TIMESTAMP WHERE operation_id=?",
+                (target_op_id,),
+            )
+        capacity.release_terminal_in_transaction(provider_kind, target_op_id)
 
     if len(pending_operation_ids) > 0:
         # Partial resolution: keep other uncertain operations quarantined.
@@ -2310,14 +2422,13 @@ def recover_unknown_keyframe_submission(
                 "unknown_operation_ids": [target_op_id],
             },
         }
+        if abandonment is not None:
+            event["payload"]["operator_abandonment"] = abandonment
+        if omitted_legacy_end:
+            event["payload"]["omitted_frame_id"] = target_request.frame_id
         capacity = ProviderCapacityStore(connection)
         with connection:
-            capacity.release_terminal_in_transaction(provider_kind, target_op_id)
-            if not invalid_output_proven:
-                connection.execute(
-                    "UPDATE video_factory_keyframe_operation SET status = 'failed', error_code = 'REPLACED_AFTER_UNKNOWN_OUTCOME', updated_at = CURRENT_TIMESTAMP WHERE operation_id = ?",
-                    (target_op_id,),
-                )
+            retire_previous_operation(capacity)
             repo.commit_workflow_in_transaction(
                 workflow_id=workflow_id,
                 aggregate_json=json.dumps(updated),
@@ -2328,7 +2439,7 @@ def recover_unknown_keyframe_submission(
         return {
             "workflow_id": workflow_id,
             "reconciled": 0,
-            "replaced": 1,
+            "replaced": int(not omitted_legacy_end),
             "resumed": False,
             "pending_operation_ids": pending_operation_ids,
         }
@@ -2378,6 +2489,8 @@ def recover_unknown_keyframe_submission(
             "unknown_operation_ids": [target_op_id],
         },
     }
+    if abandonment is not None:
+        recovery_event["payload"]["operator_abandonment"] = abandonment
     if presend_proven:
         recovery_event["event_type"] = "PreSendKeyframeRetryAuthorized"
         recovery_event["payload"] = {
@@ -2397,20 +2510,18 @@ def recover_unknown_keyframe_submission(
             "output_dimensions": operation_metadata.get("output_dimensions"),
             "evidence": "provider output received; recorded file SHA and decoded dimensions verified; native 9:16 ratio rejected",
         }
+    if omitted_legacy_end:
+        recovery_event["event_type"] = "UnplannedEndKeyframeOmitted"
+        recovery_event["payload"]["omitted_frame_id"] = target_request.frame_id
     events = [
     ]
     events.append(recovery_event)
-    if not presend_proven:
+    if not presend_proven and not omitted_legacy_end:
         events.append(retry_event)
 
     capacity = ProviderCapacityStore(connection)
     with connection:
-        capacity.release_terminal_in_transaction(provider_kind, target_op_id)
-        if not invalid_output_proven:
-            connection.execute(
-                "UPDATE video_factory_keyframe_operation SET status = 'failed', error_code = 'REPLACED_AFTER_UNKNOWN_OUTCOME', updated_at = CURRENT_TIMESTAMP WHERE operation_id = ?",
-                (target_op_id,),
-            )
+        retire_previous_operation(capacity)
         repo.commit_workflow_in_transaction(
             workflow_id=workflow_id,
             aggregate_json=json.dumps(next_aggregate),
@@ -2426,7 +2537,7 @@ def recover_unknown_keyframe_submission(
         "recovery_attempt": recovery_attempt,
         "recovery_plan": plan,
         "reconciled": 0,
-        "replaced": 1,
+        "replaced": int(not omitted_legacy_end),
         "resumed": True,
         "pending_operation_ids": [],
     }

@@ -13,7 +13,7 @@ if hasattr(sys.stdout, "reconfigure"):
 if hasattr(sys.stderr, "reconfigure"):
     sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 
-from tools.selection_handoff import (SHEETS, _pool_lock, apply_import_ack,
+from tools.selection_handoff import (MAX_SHEET_SELECTION, SHEETS, _pool_lock, _read_pool, apply_import_ack,
                                      normalize_sources, publish_selection, write_pool)
 from tools.sheet_selection_agent import _complete, select_from_pool
 from tools.sheet_snapshot import download_snapshots, fetch_public_xlsx
@@ -44,13 +44,52 @@ def run_daily(*, root: Path, day: str, db_path: Path, fetch=fetch_public_xlsx,
         selection = read_json(proposal)
     else:
         selection = select_from_pool(rows, complete=complete, candidate_limit=candidate_limit, limit=limit)
+        selection["requested_limit"] = limit
         atomic_json(proposal, selection)
+    output = _process_selection(selection, root=root, pool=pool, day=day, db_path=db_path,
+                                inbox_root=inbox_root, acquire=acquire)
+    remaining = MAX_SHEET_SELECTION - output["selected_count"]
+    if limit != MAX_SHEET_SELECTION or not remaining or selection.get("requested_limit") == MAX_SHEET_SELECTION:
+        return output
+
+    # A same-day move from a smaller limit can append one immutable selection.
+    supplement_path = proposal.with_name("selection-supplement.json")
+    with _pool_lock(supplement_path):
+        if supplement_path.is_file():
+            supplement = read_json(supplement_path)
+        else:
+            supplement = select_from_pool(_read_pool(pool), complete=complete,
+                                          candidate_limit=candidate_limit, limit=remaining)
+            atomic_json(supplement_path, supplement)
+        extra = _process_selection(supplement, root=root, pool=pool, day=day, db_path=db_path,
+                                   inbox_root=inbox_root, acquire=acquire)
+    if not extra["selected_count"]:
+        return output
+    if not output["selected_count"]:
+        return extra
+    output["selected_count"] += extra["selected_count"]
+    output["run_dirs"] = [output["run_dir"], extra["run_dir"]]
+    batches = [*output.get("exchange_batches", []), *extra.get("exchange_batches", [])]
+    if batches:
+        output["exchange_batches"] = batches
+    pending = [*output.get("pending_items", []), *extra.get("pending_items", [])]
+    if pending:
+        output.update(status="waiting", pending_items=pending,
+                      reason=output.get("reason") or extra.get("reason"),
+                      next_step=output.get("next_step") or extra.get("next_step"))
+    elif batches:
+        output["status"] = "success"
+    return output
+
+
+def _process_selection(selection, *, root, pool, day, db_path, inbox_root, acquire):
     selected = selection.get("selected")
     if not isinstance(selected, list):
         raise ValueError("Selection proposal requires a selected array")
     result = publish_selection(pool, root / "selection_batches" / "selected_products.csv",
                                root / "selection_batches", batch_date=day.replace("-", ""),
                                candidate_ids=[item["candidate_id"] for item in selected],
+                               limit=max(15, len(selected)),
                                drafts={item["candidate_id"]: item for item in selected})
     if not selected:
         return {"status": "no_eligible_products", "selected_count": 0, "day": day}
@@ -84,19 +123,23 @@ def run_daily(*, root: Path, day: str, db_path: Path, fetch=fetch_public_xlsx,
         output.update(status="waiting", pending_items=pending,
                       reason=acquisition_reason or "Đang chờ PI thu thập và duyệt ảnh sản phẩm từ hai Google Sheets.",
                       next_step=f"Tiếp tục Spaiauto intake tại {run}, rồi chạy lại cùng ngày.")
-        return output
     
     published_batches = []
     for row in state["rows"]:
         if row["status"] == "completed":
             row_id = row["row_id"]
+            entry = {"row_id": row_id, "name": row["name"], "candidate_id": row.get("candidate_id"),
+                     "selection_batch_id": result["batch_id"]}
             try:
                 batch_path = publish(run, inbox_root, eligible_only=True, row_id=row_id)
-                published_batches.append({"row_id": row_id, "batch_path": str(batch_path), "name": row["name"]})
+                published_batches.append({**entry, "batch_path": str(batch_path)})
             except Exception as exc:
-                published_batches.append({"row_id": row_id, "error": str(exc), "name": row["name"]})
+                published_batches.append({**entry, "error": str(exc)})
     
-    output.update(status="success", exchange_batches=published_batches)
+    if published_batches:
+        output["exchange_batches"] = published_batches
+        if not pending:
+            output["status"] = "success"
     return output
 
 

@@ -740,6 +740,12 @@ def create_product_video_topic_handlers(
             )
 
         if isinstance(result, JobFailed):
+            if repo and result.retryable and result.code == "PROVIDER_CAPACITY_WAIT":
+                from video_factory.workflows.runtime_control import pause_pipeline
+
+                pause_pipeline(repo.conn, category=FailureCategory.QC_INFRA_PAUSED,
+                               code=result.code, message=result.message, workflow_id=target_wf)
+                raise JobDeferred(result.message, delay_seconds=15.0)
             if (repo and result.code in {'KEYFRAME_CONTENT_FAIL','STORYBOARD_CONTENT_FAIL','CLIP_CONTENT_FAIL','FINAL_CONTENT_FAIL','FINAL_TECHNICAL_FAIL'} and
                 isinstance(result.artifact_ref,dict) and isinstance(result.artifact_ref.get('creative_repair'),dict)):
                 wf_data = repo.get_workflow(target_wf)
@@ -1182,7 +1188,7 @@ def create_product_video_topic_handlers(
                                 qc_attempt_number, qc_verdict = _record_keyframe_qc_result(
                                     repo.conn, target_wf, expected_artifact, qc_res
                                 )
-                            if low_qc:
+                            if low_qc and qc_verdict != "fail":
                                 receipt = _qc_report_payload(qc_res) if isinstance(qc_res, dict) else {}
                                 receipt = dict(receipt or (qc_res if isinstance(qc_res, dict) else {}))
                                 receipt.setdefault("stage", QCStage.KEYFRAME.value)
@@ -1404,7 +1410,18 @@ def create_product_video_topic_handlers(
                             is_hitl = True
                             gate_name = "AwaitingStoryboardApproval"
                     elif job_name == "product_video.render":
-                        if provider_mode == "configured":
+                        policy = agg.get("creative_policy") or {}
+                        if (provider_mode == "configured" and policy.get("creative_mode") == "four_agent"
+                                and policy.get("qc_level") == "low"):
+                            from video_factory.creative.agents.video_review import require_final_pass
+
+                            require_final_pass(result.artifact_ref)
+                            next_agg["state"] = transition(
+                                ProductVideoWorkflowState.RENDERING, ProductVideoWorkflowState.AWAITING_FINAL_APPROVAL,
+                            ).value
+                            is_hitl = True
+                            gate_name = "AwaitingFinalApproval"
+                        elif provider_mode == "configured":
                             repo.commit_workflow(
                                 workflow_id=target_wf,
                                 aggregate_json=json.dumps(next_agg),

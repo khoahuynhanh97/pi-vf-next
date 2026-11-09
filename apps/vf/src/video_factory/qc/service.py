@@ -972,6 +972,7 @@ class ProductVideoQCService:
 
         if stage == QCStage.KEYFRAME:
             package = artifact_override or aggregate.get("storyboard") or {}
+            essential_only = (aggregate.get("creative_policy") or {}).get("qc_level") == "low"
             if not isinstance(package, dict) or not package.get("generated_keyframes"):
                 return {
                     "status": "unknown",
@@ -1015,6 +1016,7 @@ class ProductVideoQCService:
                     for path in item.get("reference_image_paths", [])
                 ],
                 attempt_id=str(effective_attempt_id),
+                keyframe_essential_only=essential_only,
             )
             allocation, completed = _admit(fingerprint)
             if completed:
@@ -1028,6 +1030,7 @@ class ProductVideoQCService:
                 attempt_id=str(effective_attempt_id),
                 owner_user_id=owner_user_id,
                 project_id=project_id,
+                essential_only=essential_only,
             )
             return _finish(fingerprint, report, allocation)
 

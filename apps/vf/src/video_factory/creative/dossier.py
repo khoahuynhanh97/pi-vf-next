@@ -125,8 +125,7 @@ def _claims(snapshot: Mapping[str, object]) -> tuple[EvidenceClaim, ...]:
     return tuple(claims)
 
 
-def _eligible_assets(report: QCReport) -> tuple[EligibleAsset, ...]:
-    raw_manifest = report.findings.get("eligible_reference_manifest", [])
+def _eligible_assets(raw_manifest: object, receipt_id: str) -> tuple[EligibleAsset, ...]:
     if not isinstance(raw_manifest, list):
         raise DossierBuildError("Image QC eligible reference manifest is missing")
     assets: list[EligibleAsset] = []
@@ -146,7 +145,7 @@ def _eligible_assets(report: QCReport) -> tuple[EligibleAsset, ...]:
                 asset_id=asset_id,
                 path=str(asset_path),
                 sha256=actual,
-                qc_report_id=report.report_id,
+                qc_report_id=receipt_id,
                 visual_observations=_strings(item.get("visual_observations")),
                 reference_rank=int(item.get("reference_rank", 0) or 0),
                 qc_score=int(item.get("qc_score", item.get("score", 0)) or 0),
@@ -167,15 +166,23 @@ def build_research_dossier(
     *,
     workflow_id: str,
     resource_pack: Mapping[str, object],
-    qc_report: QCReport,
+    qc_report: QCReport | None,
     research_snapshot: Mapping[str, object],
     approved_learnings: Sequence[Mapping[str, object]] = (),
     source_snapshot: Mapping[str, object] | None = None,
     reference_identity_mode: str = 'legacy_path',
+    exchange_lock: tuple[str, list[dict]] | None = None,
 ) -> ResearchDossier:
-    if qc_report.workflow_id != workflow_id:
-        raise DossierBuildError("Image QC workflow does not match dossier workflow")
-    if qc_report.stage != QCStage.IMAGE or qc_report.verdict != QCVerdict.PASS:
+    if qc_report is not None:
+        if qc_report.workflow_id != workflow_id:
+            raise DossierBuildError("Image QC workflow does not match dossier workflow")
+        if qc_report.stage != QCStage.IMAGE or qc_report.verdict != QCVerdict.PASS:
+            raise DossierBuildError("a passing Image QC report is required")
+        manifest = qc_report.findings.get("eligible_reference_manifest", [])
+        receipt_id = qc_report.report_id
+    elif exchange_lock is not None:
+        receipt_id, manifest = exchange_lock
+    else:
         raise DossierBuildError("a passing Image QC report is required")
     try:
         identity = _identity(resource_pack)
@@ -192,7 +199,7 @@ def build_research_dossier(
             workflow_id=workflow_id,
             product_identity=identity,
             verified_claims=_claims(research_snapshot),
-            eligible_assets=_eligible_assets(qc_report),
+            eligible_assets=_eligible_assets(manifest, receipt_id),
             restricted_claims=_strings(research_snapshot.get("restricted_claims") or research_snapshot.get("restrictions")),
             audience_signals=_strings(research_snapshot.get("audience_signals")),
             pain_points=_strings(research_snapshot.get("pain_points")),

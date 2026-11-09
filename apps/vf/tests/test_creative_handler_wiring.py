@@ -443,8 +443,8 @@ def test_video_factory_adapter_syncs_only_qc_eligible_assets_before_brief() -> N
 
 
 
-@pytest.mark.parametrize("verdict", ["PASS", "FAIL", "error", None])
-def test_scene_plan_observes_preproduction_without_changing_gate(tmp_path, monkeypatch, verdict):
+@pytest.mark.parametrize("case", ["PASS", "FAIL", "error", None, "v2_observe", "v2_error"])
+def test_scene_plan_observes_preproduction_without_changing_gate(tmp_path, monkeypatch, case):
     from copy import deepcopy
     from test_agent_contracts import profile
     from video_factory.automation.creative_policy import evaluate_auto_gate
@@ -454,6 +454,13 @@ def test_scene_plan_observes_preproduction_without_changing_gate(tmp_path, monke
 
     from dataclasses import replace
     from PIL import Image
+
+    verdict = case
+    is_v2 = case in ("v2_observe", "v2_error")
+    if case == "v2_observe":
+        verdict = "PASS"
+    elif case == "v2_error":
+        verdict = "error"
 
     monkeypatch.chdir(tmp_path)
     dossier = _dossier(tmp_path)
@@ -475,17 +482,27 @@ def test_scene_plan_observes_preproduction_without_changing_gate(tmp_path, monke
         tuple(ScenePrompt(s.scene_id, "start", "", "motion", "", s.reference_asset_ids)
               for s in script.scenes))
 
+    received_context = {}
+
     def review(self, *, stage, context, media):
         from video_factory.creative.agents.critic import review_input_digest
+        received_context.update(context)
         if verdict == "error":
             raise OSError("critic unavailable")
+        evaluator_receipt = {"model": "fixture"}
+        if context.get("rubric_version") == "v2":
+            evaluator_receipt["rubric_version"] = "v2"
+            evaluator_receipt["director_config_version"] = context.get("director_config_version")
         return CreativeReview(stage, verdict, review_input_digest(stage, context, media), (),
-                              {"method": "fixture"}, {"model": "fixture"})
+                              {"method": "fixture"}, evaluator_receipt)
     monkeypatch.setattr(CreativeCritic, "review", review)
 
     policy = {"creative_mode": "four_agent", "auto_export": True}
     if verdict is not None:
         policy["preproduction_gate"] = "observe"
+    if is_v2:
+        policy["rubric_version"] = "v2"
+        policy["director_config_version"] = "scene-bible-v1"
     repo = MagicMock()
     repo.get_workflow.return_value = ({"state": "creating_scene_plan", "creative_policy": policy}, 1)
     handlers = ProductVideoJobHandlers(pi_client=MagicMock(), video_client=MagicMock(),
@@ -495,11 +512,20 @@ def test_scene_plan_observes_preproduction_without_changing_gate(tmp_path, monke
                                      generator.brief.to_dict())
     assert isinstance(result, JobSucceeded)
     artifact = result.artifact_ref
+    parsed_plan = ScriptScenePlanV2.from_dict(artifact)
+    assert artifact["script_digest"] == parsed_plan.script_digest
+    assert artifact["script_digest"] == artifact["scene_prompts"]["script_digest"]
     current = current_preproduction_review(artifact)
     if verdict is None:
         assert current is None and "preproduction_review" not in artifact
     else:
+        assert current is not None
         assert current.verdict == ("UNKNOWN" if verdict == "error" else verdict)
+        if is_v2:
+            assert received_context.get("rubric_version") == "v2"
+            assert received_context.get("director_config_version") == "scene-bible-v1"
+            assert current.evaluator_receipt.get("rubric_version") == "v2"
+            assert current.evaluator_receipt.get("director_config_version") == "scene-bible-v1"
         for field in ("scenes", "scene_prompts"):
             changed = deepcopy(artifact)
             if field == "scenes":

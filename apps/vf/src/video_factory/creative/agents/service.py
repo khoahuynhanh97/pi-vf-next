@@ -11,10 +11,11 @@ from ..contracts import canonical_digest
 class AgenticCreativeGenerator(SingleModelCreativeGenerator):
     creative_mode = 'four_agent'
 
-    def __init__(self, model, *, profile, category, visible_details, source_verifier=None):
+    def __init__(self, model, *, profile, category, visible_details, source_verifier=None, director_config_version=None):
         super().__init__(model, source_verifier)
         self.profile = profile
         self.recipe = select_playbook(category, profile, tuple(visible_details))
+        self.director_config_version = director_config_version
 
     def create_direction(self, dossier):
         return CreativeStrategist(self.model, recipe=self.recipe, profile=self.profile,
@@ -24,7 +25,9 @@ class AgenticCreativeGenerator(SingleModelCreativeGenerator):
         return self.director().create_script(dossier, brief, revision_feedback=revision_feedback)
 
     def director(self):
-        return VisualDirector(self.model, recipe=self.recipe, profile=self.profile, source_verifier=self.source_verifier)
+        return VisualDirector(self.model, recipe=self.recipe, profile=self.profile,
+                              source_verifier=self.source_verifier,
+                              director_config_version=self.director_config_version)
 
     def create_scene_prompts(self, dossier, script, profile=None):
         if profile is not None and profile != self.profile:

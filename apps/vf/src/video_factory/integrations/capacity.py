@@ -120,6 +120,7 @@ class ProviderCapacityStore:
         now = time.time()
         self.connection.execute("BEGIN IMMEDIATE")
         try:
+            self.cleanup_orphaned_slots(self.connection)
             # The maintenance owner and provider owner arbitrate in the same
             # SQLite write transaction. Check before renewal/takeover as well
             # as fresh admission. Global Flow exclusion matches RepairLedger's
@@ -238,60 +239,29 @@ class ProviderCapacityStore:
         """Release terminal capacity slot inside a caller-managed transaction."""
         self.release_terminal(provider_kind, operation_id, in_transaction=True)
 
+    @staticmethod
+    def cleanup_orphaned_slots(connection: sqlite3.Connection) -> int:
+        """Release proven terminal reservations inside the caller's transaction."""
+        count = 0
+        for table in ("video_factory_keyframe_operation", "video_factory_scene_operation"):
+            columns = {row[1] for row in connection.execute(f"PRAGMA table_info({table})")}
+            if not {"operation_id", "provider_kind", "provider_operation_id", "status", "error_code"} <= columns:
+                continue
+            cursor = connection.execute(
+                f"""DELETE FROM video_factory_provider_capacity AS slot
+                    WHERE EXISTS (
+                        SELECT 1 FROM {table} AS op
+                        WHERE op.operation_id=slot.operation_id AND op.provider_kind=slot.provider_kind
+                          AND (slot.provider_operation_id='' OR op.provider_operation_id=slot.provider_operation_id)
+                          AND (op.status IN ('completed', 'cancelled', 'canceled')
+                               OR (op.status='failed' AND op.error_code='OPERATOR_RECONCILED_FAILED'))
+                    )"""
+            )
+            count += cursor.rowcount
+        return count
+
     def active(self, provider_kind: str) -> list[dict[str, Any]]:
         return [dict(row) for row in self.connection.execute(
             "SELECT * FROM video_factory_provider_capacity WHERE provider_kind=?",
             (provider_kind,),
         )]
-
-    def reclaim_expired_operations(self, *, timeout_minutes: int = 10) -> int:
-        """Reclaim capacity slots from keyframe/scene operations stuck beyond timeout."""
-        from datetime import datetime, timezone, timedelta
-        cutoff = (datetime.now(timezone.utc) - timedelta(minutes=timeout_minutes)).isoformat()
-        count = 0
-        self.connection.execute("BEGIN IMMEDIATE")
-        try:
-            for table, statuses, code_prefix in [
-                ("video_factory_keyframe_operation", ("submitting", "project_created", "unknown"), "KEYFRAME"),
-                ("video_factory_scene_operation", ("submitted", "running"), "SCENE"),
-            ]:
-                exists = self.connection.execute(
-                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)
-                ).fetchone()
-                if not exists:
-                    continue
-                status_list = ",".join(f"'{s}'" for s in statuses)
-                expired = self.connection.execute(
-                    f"""SELECT operation_id, provider_kind, submitted_at FROM {table}
-                        WHERE status IN ({status_list})
-                          AND submitted_at IS NOT NULL
-                          AND submitted_at < ?""",
-                    (cutoff,),
-                ).fetchall()
-                for row in expired:
-                    operation_id = row["operation_id"]
-                    provider_kind = row["provider_kind"]
-                    submitted_at = row["submitted_at"]
-                    try:
-                        submitted = datetime.fromisoformat(submitted_at.replace("Z", "+00:00"))
-                        elapsed = datetime.now(timezone.utc) - submitted
-                        self.connection.execute(
-                            f"""UPDATE {table}
-                               SET status='failed', error_code='{code_prefix}_TIMEOUT_EXPIRED',
-                                   error_message=?, updated_at=CURRENT_TIMESTAMP
-                               WHERE operation_id=? AND status IN ({status_list})""",
-                            (f"{code_prefix} exceeded {timeout_minutes}min timeout (elapsed: {int(elapsed.total_seconds())}s)", operation_id),
-                        )
-                        if self.connection.execute("SELECT changes()").fetchone()[0] > 0:
-                            self.connection.execute(
-                                "DELETE FROM video_factory_provider_capacity WHERE provider_kind=? AND operation_id=?",
-                                (provider_kind, operation_id),
-                            )
-                            count += 1
-                    except (ValueError, TypeError):
-                        pass
-            self.connection.commit()
-            return count
-        except Exception:
-            self.connection.rollback()
-            raise

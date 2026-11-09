@@ -307,7 +307,11 @@ def test_coordinator_recovers_current_keyframe_pass_receipt_before_auto_gate(tmp
     conn.close()
 
 
-def test_coordinator_requeues_only_known_render_preflight_without_resetting_attempts(tmp_path, monkeypatch):
+@pytest.mark.parametrize("preflight_error", [
+    "Four-agent render requires an unchanged storyboard package",
+    "Continuous scenes require high clip and endpoint QC",
+])
+def test_coordinator_requeues_only_known_render_preflight_without_resetting_attempts(tmp_path, monkeypatch, preflight_error):
     import json
     from types import SimpleNamespace
     from test_creative_resume import config
@@ -324,6 +328,8 @@ def test_coordinator_requeues_only_known_render_preflight_without_resetting_atte
         run_config=config(),
     )["workflow_id"]
     aggregate, version = coordinator.workflow_repo.get_workflow(workflow_id)
+    if preflight_error.startswith("Continuous scenes"):
+        aggregate["creative_policy"]["qc_level"] = "low"
     aggregate.update(
         state="rendering",
         active_render_job_id=None,
@@ -337,7 +343,7 @@ def test_coordinator_requeues_only_known_render_preflight_without_resetting_atte
     outbox = OutboxRepository(conn).enqueue(workflow_id, message, max_attempts=5)
     conn.execute(
         "UPDATE workflow_outbox SET state='quarantined', attempt_count=1, last_error=? WHERE outbox_id=?",
-        ("Job execution failed: Four-agent render requires an unchanged storyboard package", outbox.outbox_id),
+        (f"Job execution failed: {preflight_error}", outbox.outbox_id),
     )
     conn.commit()
 
@@ -361,7 +367,7 @@ def test_coordinator_requeues_only_known_render_preflight_without_resetting_atte
     assert event is not None
     payload = json.loads(event["payload_json"])
     assert payload["outbox_id"] == outbox.outbox_id
-    assert "unchanged storyboard package" in payload["previous_error"]
+    assert preflight_error in payload["previous_error"]
     assert payload["storyboard_digest"] == "sha256:current"
     conn.close()
 

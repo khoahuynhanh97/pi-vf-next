@@ -8,6 +8,7 @@ from pathlib import Path
 
 # Timezone definition for daily triggers
 BANGKOK_TZ = timezone(timedelta(hours=7), name="Asia/Bangkok")
+DAILY_VIDEO_LIMIT = 20
 
 # Repo root: D:\work\pi-vf-next
 ROOT_DIR = Path(__file__).resolve().parent.parent

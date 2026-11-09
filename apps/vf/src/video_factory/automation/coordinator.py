@@ -1553,7 +1553,7 @@ class ProductVideoCoordinator:
                 raise ValueError('product already has a completed creative output')
         from .creative_policy import preproduction_policy
         policy={**run_config, **preproduction_policy(run_config),
-                'creative_mode':'four_agent','auto_export':True,'fresh_acquisition':True,
+                'creative_mode':'four_agent','director_config_version':'scene-bible-v1','auto_export':True,'fresh_acquisition':True,
                 'creative_input_digest':fingerprint,'query':query}
         pdp_url = query if str(query).startswith(('http://', 'https://')) else None
         start_product_video_workflow(self.workflow_repo,workflow_id,query,[query],
@@ -1577,7 +1577,8 @@ class ProductVideoCoordinator:
         if profile.audio_policy != 'silent':
             raise ValueError('catalog production requires a silent profile')
         from .creative_policy import preproduction_policy
-        return {**run_config, **preproduction_policy(run_config), 'creative_mode':'four_agent', 'auto_export':True,
+        return {**run_config, **preproduction_policy(run_config), 'creative_mode':'four_agent',
+                'director_config_version':'scene-bible-v1', 'auto_export':True,
                 'fresh_acquisition':False, 'preparation_only':True,
                 'preparation_id':preparation_id, 'query':product_key,
                 'creative_input_digest':canonical_digest({'product_key':product_key, 'config':run_config})}
@@ -1661,7 +1662,7 @@ class ProductVideoCoordinator:
         if prior.get('preparation_id') and prior['preparation_id'] != preparation_id:
             raise ValueError('source already bound to a different preparation ID')
         if prior.get('preparation_id'):
-            for key in ('preproduction_gate', 'preproduction_threshold'):
+            for key in ('preproduction_gate', 'preproduction_threshold', 'rubric_version', 'director_config_version'):
                 if key in run_config and key in prior and run_config[key] != prior[key]:
                     raise ValueError(f'{key} is pinned for this preparation')
                 if key in prior:
@@ -2047,43 +2048,8 @@ class ProductVideoCoordinator:
         try:
             conn = sqlite3.connect(f"file:{render_db.as_posix()}?mode=ro", uri=True)
             conn.row_factory = sqlite3.Row
-            batch = conn.execute(
-                "SELECT project_id, workflow_id, scene_count FROM video_factory_render_batches "
-                "WHERE render_batch_id=?", (batch_id,),
-            ).fetchone()
-            if batch is None or batch['workflow_id'] != workflow_id or int(batch['scene_count']) < 1:
-                return None
-            rows = conn.execute(
-                "SELECT operation_id, scene_id, status, provider_operation_id, output_path, "
-                "output_sha256, provider_kind, render_batch_id FROM video_factory_scene_operation "
-                "WHERE render_batch_id=? ORDER BY scene_order", (batch_id,),
-            ).fetchall()
-            if len(rows) != int(batch['scene_count']):
-                return None
-            scene_evidence = []
-            active = []
-            for index, row in enumerate(rows):
-                if (not row['provider_operation_id'] or row['provider_kind'] != provider_kind
-                        or row['render_batch_id'] != batch_id):
-                    return None
-                if row['status'] == 'completed':
-                    output = Path(str(row['output_path'] or ''))
-                    expected = str(row['output_sha256'] or '').removeprefix('sha256:').lower()
-                    if (not output.is_file() or not expected
-                            or hashlib.sha256(output.read_bytes()).hexdigest() != expected):
-                        return None
-                elif row['status'] in {'submitted', 'running'} and index == len(rows) - 1:
-                    active.append(row)
-                else:
-                    return None
-                scene_evidence.append({
-                    'operation_id': row['operation_id'], 'scene_id': row['scene_id'],
-                    'provider_operation_id': row['provider_operation_id'], 'status': row['status'],
-                    'sha256': expected if row['status'] == 'completed' else None,
-                })
-            if len(active) > 1:
-                return None
-            return {'project_id': batch['project_id'], 'scenes': scene_evidence}
+            from video_factory.workflows.runtime_control import verified_render_finalization_checkpoint
+            return verified_render_finalization_checkpoint(conn, workflow_id, batch_id, provider_kind)
         except (OSError, sqlite3.Error, TypeError, ValueError):
             return None
         finally:
@@ -2115,19 +2081,20 @@ class ProductVideoCoordinator:
         if agg['state'] in {'completed','skipped','WaitingForOperator','contract_broken'}:
             return {'state':agg['state'],'action':'stop'}
         from video_factory.workflows.runtime_control import (
-            get_pipeline_pause,
+            PROVIDER_AVAILABILITY_PAUSE_CODES,
+            ensure_pipeline_pause,
             is_shared_infra_blocker,
-            workflow_has_inflight_operation,
+            workflow_can_advance_during_capacity_wait,
         )
-        pause=get_pipeline_pause(self.connection)
+        pause=ensure_pipeline_pause(self.connection)
         if pause and pause.get('paused'):
             pause_code = str(pause.get('code') or '')
             paused_wf = str(pause.get('workflow_id') or '')
-            has_inflight = (
-                pause_code == "PROVIDER_CAPACITY_WAIT"
-                and workflow_has_inflight_operation(self.connection, workflow_id)
+            can_advance = (
+                pause_code in PROVIDER_AVAILABILITY_PAUSE_CODES
+                and workflow_can_advance_during_capacity_wait(self.connection, workflow_id)
             )
-            if not has_inflight:
+            if not can_advance:
                 if is_shared_infra_blocker(pause_code) or (paused_wf and paused_wf == workflow_id) or not paused_wf:
                     return {'workflow_id':workflow_id,'state':agg['state'],'action':'blocker',
                         'code':pause.get('code'),'reason':pause.get('message') or 'pipeline paused'}
@@ -2252,16 +2219,6 @@ class ProductVideoCoordinator:
                     (workflow_id,),
                 ).fetchone()
             )
-            known_preflight_error = (
-                not agg.get('active_render_job_id')
-                and outbox is not None
-                and outbox['state'] == 'quarantined'
-                and any(error in str(outbox['last_error'] or '') for error in (
-                    'Four-agent render requires an unchanged storyboard package',
-                    'KEYFRAME_QC_REQUIRED: END keyframe is not permitted by the scene policy',
-                ))
-                and not has_render_batch
-            )
             bound_render_message = False
             if outbox is not None:
                 try:
@@ -2275,6 +2232,21 @@ class ProductVideoCoordinator:
                     )
                 except (TypeError, ValueError, json.JSONDecodeError):
                     pass
+            last_error = str(outbox['last_error'] or '') if outbox is not None else ''
+            known_preflight_error = (
+                bound_render_message
+                and not agg.get('active_render_job_id')
+                and outbox['state'] == 'quarantined'
+                and not has_render_batch
+                and (
+                    any(error in last_error for error in (
+                        'Four-agent render requires an unchanged storyboard package',
+                        'KEYFRAME_QC_REQUIRED: END keyframe is not permitted by the scene policy',
+                    ))
+                    or ((agg.get('creative_policy') or {}).get('qc_level') == 'low'
+                        and last_error.endswith('Continuous scenes require high clip and endpoint QC'))
+                )
+            )
             finalization_recovery_used = self.connection.execute(
                 "SELECT 1 FROM workflow_event WHERE workflow_id=? AND event_type='RenderFinalizationResumed' LIMIT 1",
                 (workflow_id,),
@@ -2370,7 +2342,7 @@ class ProductVideoCoordinator:
                 next_aggregate = dict(agg)
                 if known_preflight_error:
                     event_type = 'RenderPreflightFailureRecovered'
-                    reason = 'Render digest preflight was fixed; no render batch/provider operation was created.'
+                    reason = 'Render preflight was fixed; no render batch or provider operation was created.'
                     audit_payload = {
                         'outbox_id': int(outbox['outbox_id']),
                         'previous_error': str(outbox['last_error'] or ''),

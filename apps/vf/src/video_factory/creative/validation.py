@@ -131,7 +131,7 @@ def validate_script(
 
     claim_ids = {claim.claim_id for claim in dossier.verified_claims}
     asset_ids = {asset.asset_id for asset in dossier.eligible_assets}
-    environments: set[str] = set()
+    visual_setups: set[str | tuple[str, str]] = set()
     actions: set[str] = set()
     for scene in script.scenes:
         if scene.duration_seconds not in {4, 6, 8}:
@@ -215,9 +215,12 @@ def validate_script(
                     f"high-risk interaction scene {scene.scene_id} requires "
                     f"{', '.join(missing_geometry)}"
                 )
-        environments.add(_normalized(scene.environment))
+        if script.scene_bible is not None:
+            visual_setups.add((_normalized(scene.camera_framing), _normalized(scene.camera_movement)))
+        else:
+            visual_setups.add(_normalized(scene.environment))
         actions.add(action)
-    if len(environments) < 2:
+    if len(visual_setups) < 2:
         raise CreativeValidationError("script requires at least two distinct visual setups")
     if len(actions) < 2:
         raise CreativeValidationError("script requires at least two distinct meaningful actions")

@@ -1089,6 +1089,7 @@ def test_start_auto_selects_next_catalog_product_after_terminal_product_rejectio
             "name": f"Brand {model}",
             "brand": brand,
             "model": model,
+                "variant": "standard",
             "images": images,
         })
         catalog_rows.append(f"{canonical},VALID,READY_FOR_IMAGE_QC")
@@ -1336,6 +1337,8 @@ def test_pause_scope_distinguishes_per_product_from_shared_infra(tmp_path: Path)
 
 
 def test_capacity_wait_blocks_new_submissions_without_deadlocking_active_operation(tmp_path: Path) -> None:
+    from video_factory.integrations.capacity import ProviderCapacityStore
+
     db_path = tmp_path / "deadlock_prevention.db"
     conn = connect(db_path)
     workflow_repo = WorkflowRepository(conn)
@@ -1364,6 +1367,9 @@ def test_capacity_wait_blocks_new_submissions_without_deadlocking_active_operati
     )
     conn.execute(
         "INSERT INTO video_factory_keyframe_operation VALUES ('wf-active-A', 'f1', 'op-A-running', 'running')"
+    )
+    assert ProviderCapacityStore(conn).try_acquire(
+        provider_kind="google_flow", operation_id="op-A-running", lease_owner="worker-A", limit=1,
     )
 
     # wf-waiting-B encountered capacity limit, causing pause
@@ -1400,6 +1406,45 @@ def test_capacity_wait_blocks_new_submissions_without_deadlocking_active_operati
     )
     assert report_a is not None and report_a.claimed == 1
     assert calls_a == ["wf-active-A"]
+
+    conn = connect(db_path)
+    with conn:
+        conn.execute("UPDATE video_factory_keyframe_operation SET status='completed' WHERE operation_id='op-A-running'")
+    ProviderCapacityStore(conn).release_terminal("google_flow", "op-A-running")
+    conn.close()
+    report_b = run_worker(db_path, provider_mode="fake", once=True, workflow_ids=["wf-waiting-B"],
+                          topic_handlers={"job.dispatch": lambda env: calls_b.append(env.workflow_id)})
+    assert report_b is not None and report_b.claimed == 1
+    assert calls_b == ["wf-waiting-B"]
+
+
+def test_capacity_wait_defers_job_without_moving_workflow_to_operator(tmp_path):
+    connection = connect(tmp_path / "deferred-capacity.db")
+    repo = WorkflowRepository(connection)
+    start_product_video_workflow(
+        workflow_repository=repo, workflow_id="wf-B", product_name="Product B",
+        keywords=["Product B"], project_id="project-B",
+    )
+    before, _ = repo.get_workflow("wf-B")
+    row = connection.execute("SELECT message FROM workflow_outbox WHERE workflow_id='wf-B'").fetchone()
+    job_name = json.loads(row[0])["payload"]["job_name"]
+
+    class BusyHandler:
+        def get_handlers_map(self):
+            return {job_name: lambda *_args, **_kwargs: JobFailed(
+                retryable=True, code="PROVIDER_CAPACITY_WAIT", message="Provider slot is occupied",
+            )}
+
+    handlers = create_product_video_topic_handlers(
+        workflow_repository=repo, handlers_service=BusyHandler(), provider_mode="fake",
+    )
+    report = OutboxDispatcher(repository=OutboxRepository(connection), topic_handlers=handlers).process_batch(
+        batch_size=1, workflow_ids=["wf-B"],
+    )
+    assert report.deferred == 1
+    assert repo.get_workflow("wf-B")[0]["state"] == before["state"]
+    assert get_pipeline_pause(connection)["code"] == "PROVIDER_CAPACITY_WAIT"
+    connection.close()
 
 
 @pytest.mark.parametrize("workflow_ids", [None, ["wf-active-A", "wf-waiting-B"]])

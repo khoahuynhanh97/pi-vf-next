@@ -20,6 +20,10 @@ def scored_preproduction_inputs(artifact, threshold):
                'bundle': artifact['scene_prompts'], 'profile': artifact['backend_profile'],
                'brief': artifact['creative_brief'], 'preproduction_threshold': threshold,
                'scene_ids': [scene['scene_id'] for scene in script['scenes']]}
+    if 'rubric_version' in artifact:
+        context['rubric_version'] = artifact['rubric_version']
+    if 'director_config_version' in artifact:
+        context['director_config_version'] = artifact['director_config_version']
     return context, dossier_media(dossier)
 
 
@@ -33,6 +37,12 @@ def current_preproduction_review(artifact):
         context, media = scored_preproduction_inputs(artifact, threshold)
         if review.stage != 'preproduction' or review.input_digest != review_input_digest('preproduction', context, media):
             return None
+        receipt = review.evaluator_receipt or {}
+        if artifact.get('rubric_version') == 'v2':
+            if receipt.get('rubric_version') != 'v2':
+                return None
+            if receipt.get('director_config_version') != artifact.get('director_config_version'):
+                return None
         if review.verdict != 'UNKNOWN':
             for ref in media:
                 ref.content()

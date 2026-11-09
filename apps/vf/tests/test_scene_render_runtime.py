@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import sqlite3
 from dataclasses import replace
 from pathlib import Path
 
 import pytest
+from PIL import Image
 
 from video_factory.integrations.ports import (
     VideoGenerationRequest,
@@ -684,8 +686,9 @@ class _SubmitThenPollProvider:
         )
 
 
+@pytest.mark.parametrize("bound_low_qc", [False, True])
 def test_server_render_checkpoints_each_scene_and_resume_polls_without_resubmit(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, bound_low_qc: bool,
 ) -> None:
     from video_factory.integrations import server
     from video_factory.workflows.budgets import (
@@ -695,9 +698,30 @@ def test_server_render_checkpoints_each_scene_and_resume_polls_without_resubmit(
     )
 
     project, package, source, keyframe = _render_fixture(tmp_path)
+    db_path = tmp_path / "factory.sqlite"
+    if bound_low_qc:
+        from video_factory.storage_infra.sqlite import connect
+        from video_factory.workflows.repository import WorkflowRepository
+
+        Image.new("RGB", (108, 192), "red").save(keyframe)
+        package["generated_keyframes"][0]["sha256"] = hashlib.sha256(keyframe.read_bytes()).hexdigest()
+        package["package_digest"] = storyboard_package_digest(package)
+        package["keyframe_qc_receipt"].update(
+            verdict="unknown", artifact_digest=package["package_digest"], findings={},
+        )
+        connection = connect(db_path)
+        try:
+            WorkflowRepository(connection).commit_workflow(
+                workflow_id="workflow-1",
+                aggregate_json=json.dumps({"creative_policy": {"qc_level": "low"}, "storyboard": package}),
+                events=[], expected_version=None,
+            )
+        finally:
+            connection.close()
+        monkeypatch.setenv("HERMES_APPROVAL_DB_PATH", str(db_path))
     service = _FakeService(project)
     server.set_service(service)
-    monkeypatch.setenv("HERMES_VIDEO_FACTORY_DB_PATH", str(tmp_path / "factory.sqlite"))
+    monkeypatch.setenv("HERMES_VIDEO_FACTORY_DB_PATH", str(db_path))
     init_default_engine(BudgetPolicy(max_total=1000, per_channel={"video_generation": 1000}))
     reservation = reserve_budget(
         "video_generation", 100, owner_user_id="operator-1", scope_id="project-1"

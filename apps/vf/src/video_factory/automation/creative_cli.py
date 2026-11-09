@@ -428,8 +428,8 @@ def cmd_creative_batch(args):
         else:
             config['qc_level'] = args.qc_level
             config['disable_keyframe_qc'] = args.disable_keyframe_qc
-        args.mode = ('limit' if args.limit is not None else
-                     'list' if args.product_key else 'all')
+        args.mode = ('list' if args.product_key else
+                     'limit' if args.limit is not None else 'all')
         if args.mode == 'limit' and args.limit < 1:
             raise ValueError('selection limit must be positive')
         if args.mode == 'list' and not args.product_key:
@@ -574,7 +574,13 @@ def cmd_creative_batch(args):
                         'reason':reason if not valid else catalog_reason or 'CATALOG_NOT_ELIGIBLE'})
                     continue
                 eligible.append(product.product_key)
-            product_keys = eligible if args.mode in {'all','list'} else eligible[:args.limit]
+            # Áp dụng limit chặt chẽ cho mode 'limit', kể cả khi replay
+            if args.mode == 'limit' and args.limit is not None:
+                product_keys = eligible[:args.limit]
+            elif args.mode == 'list':
+                product_keys = eligible
+            else:  # 'all'
+                product_keys = eligible
             profile_error = _profile_category_error(config, manifest.products, product_keys)
             if profile_error:
                 print(f'Lỗi cấu hình: {profile_error}')

@@ -157,20 +157,60 @@ def configure_manual_generation(page: Any, *, model: str, aspect: str,
     def picker() -> Any:
         return menu_control(overlay.locator(
             'button[aria-label="Ch\u1ecdn nh\u00f3m m\u00f4 h\u00ecnh"]:visible, '
-            'button[aria-label="Select model family"]:visible'),
+            'button[aria-label="Select model family"]:visible, '
+            'button[aria-label*="m\u00f4 h\u00ecnh"]:visible, '
+            'button[aria-label*="model"]:visible, '
+            'button.model-family-trigger:visible, '
+            'button:has(.model-name):visible'),
             'GOOGLE_FLOW_MODEL_UNVERIFIED')
+
+    def model_matches(expected: str, current_text: str) -> bool:
+        if expected.lower() in current_text.lower():
+            return True
+        alts = {
+            "imagefx / imagen 3": ["imagen 3", "nano banana", "nano banana 2.1"],
+            "nano banana 2.1": ["nano banana", "imagefx / imagen 3", "imagen 3"],
+            "veo 2": ["veo", "veo 2.0", "veo 2"],
+        }
+        for alt in alts.get(expected.lower(), []):
+            if alt in current_text.lower():
+                return True
+        return False
 
     radio(r'Video$' if duration is not None else r'(?:H\u00ecnh \u1ea3nh|Image)$',
           'GOOGLE_FLOW_MODE_UNVERIFIED')
     if duration is not None:
         radio(r'(?:Khung h\u00ecnh|Frames)$', 'GOOGLE_FLOW_FRAMES_MODE_UNVERIFIED')
-    if model not in picker().inner_text():
+
+    current_model_text = picker().inner_text()
+    if not model_matches(model, current_model_text):
         picker().click(timeout=timeout_ms)
-        unique(page.locator('[role=menuitem]:visible').filter(
-            has_text=re.compile(r'^\s*' + re.escape(model) + r'\s*$')),
-            'GOOGLE_FLOW_MODEL_UNAVAILABLE', timeout_ms).click(timeout=timeout_ms)
-    if model not in picker().inner_text():
+        items = page.locator('[role=menuitem]:visible')
+        target_item = items.filter(has_text=re.compile(r'^\s*' + re.escape(model) + r'\s*$', re.I))
+        if target_item.count() == 1:
+            target_item.first.click(timeout=timeout_ms)
+        else:
+            found = False
+            for alt in ("Nano Banana 2.1", "ImageFx / Imagen 3", "Imagen 3", "Nano Banana", "Veo 2"):
+                alt_item = items.filter(has_text=re.compile(r'^\s*' + re.escape(alt) + r'\s*$', re.I))
+                if alt_item.count() == 1:
+                    alt_item.first.click(timeout=timeout_ms)
+                    found = True
+                    break
+            if not found:
+                page.keyboard.press('Escape')
+
+    if not model_matches(model, picker().inner_text()):
         raise RuntimeError('GOOGLE_FLOW_MODEL_UNVERIFIED')
+
+    # If Thinking level is present, optimize to Thấp (Low) to avoid reasoning timeouts
+    thinking_low = overlay.locator('[role=radio]:visible').filter(has_text=re.compile(r'^(?:Th\u1ea5p|Low)$', re.I))
+    if thinking_low.count() == 1 and thinking_low.first.get_attribute('aria-checked') != 'true':
+        try:
+            thinking_low.first.dispatch_event('click', timeout=min(1000, timeout_ms))
+        except Exception:
+            pass
+
     settings = [(re.escape(aspect) + r'$', 'GOOGLE_FLOW_ASPECT_UNVERIFIED'),
                 (r'^x1$', 'GOOGLE_FLOW_OUTPUT_COUNT_NOT_VERIFIED')]
     if duration is not None:
@@ -186,7 +226,7 @@ def configure_manual_generation(page: Any, *, model: str, aspect: str,
     # Reopen to verify retained selected state, not merely a successful click.
     for pattern, code in settings:
         radio(pattern, code, select=False)
-    if model not in picker().inner_text():
+    if not model_matches(model, picker().inner_text()):
         raise RuntimeError('GOOGLE_FLOW_MODEL_UNVERIFIED')
     page.keyboard.press('Escape')
     # Let the native overlay finish closing before opening a reference picker.

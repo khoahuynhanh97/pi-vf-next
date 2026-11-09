@@ -279,3 +279,145 @@ s.record_run(s.ScheduleRecord("2026-01-01", "", run_id, "success", "", 0, 0))
             first.stdin.close()
         assert first.wait(timeout=5) == 0
     assert {row['run_id'] for row in daily_trigger.load_ledger()} == {'first', 'second'}
+
+
+def test_compare_qc_rubric_version_column_and_filter(monkeypatch, capsys):
+    from automation import human_review
+
+    Row = human_review.ComparisonRow
+    rows = [
+        Row("a", "80 (PASS)", "pass", 2, "reject", "script", "", 80, "v1"),
+        Row("b", "90 (PASS)", "pass", 1, "approve", "script", "", 90, "v2"),
+    ]
+    monkeypatch.setattr(human_review, 'comparison_rows', lambda *args, **kwargs: iter(rows))
+
+    # All rows: rubric column visible and distinct per-version summaries present
+    assert cli.main(['compare-qc']) == 0
+    output = capsys.readouterr().out
+    assert 'RUBRIC' in output.upper() or ('v1' in output and 'v2' in output)
+    assert 'v1' in output
+    assert 'v2' in output
+
+    # Filter with --rubric-version v2 filters out v1
+    assert cli.main(['compare-qc', '--rubric-version', 'v2']) == 0
+    filtered_output = capsys.readouterr().out
+    assert 'v2' in filtered_output
+    assert 'v1' not in filtered_output
+
+
+def test_daily_report_scene_provider_kinds_scopes_workflow_and_tolerates_missing_legacy(tmp_path, monkeypatch):
+    import hashlib
+    import json
+    import sqlite3
+    from automation import daily_report
+
+    intake = tmp_path / 'pi'
+    intake.mkdir()
+    (intake / 'intake.json').write_text(json.dumps({'rows': [
+        {'row_id': 'row_target', 'candidate_id': 'target_cand', 'name': 'Target', 'status': 'completed'},
+    ]}), encoding='utf8')
+
+    db = tmp_path / 'vf.db'
+    selection = 'pv-creative-batch-' + hashlib.sha256(b'run').hexdigest()[:24]
+
+    with sqlite3.connect(db) as conn:
+        # Standard workflow tables
+        conn.execute('CREATE TABLE workflow(workflow_id, aggregate_json)')
+        conn.execute('CREATE TABLE workflow_event(workflow_id, event_type, payload_json)')
+        # Actual production tables for render batches and scene operations
+        conn.execute('''CREATE TABLE video_factory_render_batches (
+            render_batch_id TEXT PRIMARY KEY,
+            project_id TEXT NOT NULL,
+            owner_user_id TEXT NOT NULL,
+            workflow_id TEXT
+        )''')
+        conn.execute('''CREATE TABLE video_factory_scene_operation (
+            operation_id TEXT PRIMARY KEY,
+            render_batch_id TEXT NOT NULL,
+            project_id TEXT NOT NULL,
+            owner_user_id TEXT NOT NULL,
+            scene_id TEXT NOT NULL,
+            scene_order INTEGER NOT NULL,
+            provider_kind TEXT NOT NULL,
+            attempt INTEGER NOT NULL,
+            status TEXT NOT NULL,
+            submitted_at TEXT,
+            provider_operation_id TEXT
+        )''')
+
+        # Batch selection pointing to target workflow wf_target (unrelated wf_other is not included)
+        conn.execute('INSERT INTO workflow VALUES (?, ?)', (selection, json.dumps({'prepared_refs': ['wf_target']})))
+
+        # Target workflow
+        conn.execute('INSERT INTO workflow VALUES (?, ?)', ('wf_target', json.dumps({
+            'state': 'completed',
+            'source_context': {
+                'source_product_id': 'row_target',
+                'creative_input': {'candidate_id': 'target_cand'},
+            },
+        })))
+
+        # Unrelated workflow
+        conn.execute('INSERT INTO workflow VALUES (?, ?)', ('wf_other', json.dumps({
+            'state': 'completed',
+            'source_context': {
+                'source_product_id': 'row_unrelated',
+                'creative_input': {'candidate_id': 'unrelated_cand'},
+            },
+        })))
+
+        # Batches: target batch and unrelated batch
+        conn.execute('INSERT INTO video_factory_render_batches VALUES (?, ?, ?, ?)',
+                     ('batch_1', 'proj_1', 'user_1', 'wf_target'))
+        conn.execute('INSERT INTO video_factory_render_batches VALUES (?, ?, ?, ?)',
+                     ('batch_unrelated', 'proj_2', 'user_2', 'wf_other'))
+
+        # Scene operations for target batch:
+        # 1. Submitted google_flow attempt 1 (failed)
+        conn.execute('INSERT INTO video_factory_scene_operation VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+                     ('op_1', 'batch_1', 'proj_1', 'user_1', 'scene_01', 1, 'google_flow', 1, 'failed', '2026-01-01T10:00:00', 'prov_op_1'))
+        # 2. Submitted vertex_ai attempt 2 (completed)
+        conn.execute('INSERT INTO video_factory_scene_operation VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+                     ('op_2', 'batch_1', 'proj_1', 'user_1', 'scene_01', 1, 'vertex_ai', 2, 'completed', '2026-01-01T10:05:00', 'prov_op_2'))
+        # 3. Planned / pinned attempt (submitted_at IS NULL and provider_operation_id is empty/NULL) -> should be excluded by query
+        conn.execute('INSERT INTO video_factory_scene_operation VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+                     ('op_3', 'batch_1', 'proj_1', 'user_1', 'scene_02', 2, 'google_flow', 1, 'planned', None, None))
+        # 4. Operation from unrelated workflow/batch -> should be excluded
+        conn.execute('INSERT INTO video_factory_scene_operation VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+                     ('op_unrelated', 'batch_unrelated', 'proj_2', 'user_2', 'scene_unrelated', 1, 'vertex_ai', 1, 'completed', '2026-01-01T10:00:00', 'prov_op_other'))
+
+    monkeypatch.setattr(daily_report, '_notify_telegram', lambda *args: None)
+    monkeypatch.setattr(daily_report, 'preproduction_summary', lambda artifact: {
+        'verdict': 'PASS', 'scores': {}, 'total_tokens': 10})
+
+    result = PipelineRunResult('run', 'success', '2026-01-01', '', '', 1, 1, 'configured',
+                               intake_result={'run_dir': str(intake)})
+    path = daily_report.write_daily_report(result, db_path=db, root=tmp_path / 'reports')
+    payload = json.loads(path.read_text(encoding='utf8'))
+    products = payload['runs']['configured:run']['products']
+
+    assert len(products) == 1
+    target_product = products[0]
+    assert 'scene_provider_kinds' in target_product
+
+    records = target_product['scene_provider_kinds']
+    assert len(records) == 2
+
+    # Verify scene_id, provider_kind, attempt, status present in records
+    assert any(
+        r.get('scene_id') == 'scene_01' and
+        r.get('provider_kind') == 'google_flow' and
+        r.get('attempt') == 1 and
+        r.get('status') == 'failed'
+        for r in records
+    )
+    assert any(
+        r.get('scene_id') == 'scene_01' and
+        r.get('provider_kind') == 'vertex_ai' and
+        r.get('attempt') == 2 and
+        r.get('status') == 'completed'
+        for r in records
+    )
+    # Assert no unrelated scene appears and planned attempt is excluded
+    assert not any(r.get('scene_id') == 'scene_unrelated' for r in records)
+    assert not any(r.get('status') == 'planned' for r in records)
