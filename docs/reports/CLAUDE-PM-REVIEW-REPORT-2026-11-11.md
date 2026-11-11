@@ -9,7 +9,17 @@
 
 ---
 
-## 1. Mục tiêu (Objectives) & Nguyên tắc bất biến (Invariants)
+## 1. Mục tiêu (Objectives) & Định hướng cốt lõi (Core Principles)
+
+> [!IMPORTANT]
+> **TÍNH CHẤT DỰ ÁN: CÔNG CỤ CÁ NHÂN & LÀM AFFILIATE MARKETING (CHẤP NHẬN SAI SÓT NHỎ)**
+> - **Bản chất hệ thống:** Đây là công cụ cá nhân (solo-operator tool), phục vụ mục đích **sản xuất video POV làm affiliate marketing** (kéo view, giới thiệu sản phẩm để gắn link bán hàng / bio).
+> - **Ưu tiên hàng đầu là tốc độ & sản lượng ra video hằng ngày (Speed & Output Volume):** Không yêu cầu độ hoàn hảo tuyệt đối như TVC thương mại hay quảng bá thương hiệu lớn.
+> - **Chấp nhận sai sót nhỏ:** Các chi tiết phụ như phông nền, góc ánh sáng, hoặc khác biệt nhỏ về cách bài trí đều được chấp nhận, miễn là:
+>   1. Video thể hiện đúng sản phẩm cốt lõi.
+>   2. Không bị dính chữ/banner/watermark rác che mất sản phẩm.
+>   3. Video phát được (MP4 dọc 9:16, PyAV decodable), receipt khớp file.
+> - **Giữ QC ở mức `low`:** Tránh việc AI Critic hoặc bộ lọc kỹ thuật quá khắt khe làm `reject` hoặc dừng pipeline một cách không cần thiết.
 
 ### 1.1. Mục tiêu kinh doanh & Vận hành
 1. **Tạo video POV bán hàng tự động:** Tự động hóa quy trình từ dòng dữ liệu trên Google Sheets → cào ảnh Shopee/TikTok qua Spaiauto → AI Vision thẩm định ảnh thật → sinh kịch bản POV 4 cảnh → sinh keyframe & render clip qua Google Flow → ghép, kiểm tra kỹ thuật và xuất MP4 dọc 9:16.
@@ -130,6 +140,7 @@ flowchart TD
 
 ## 7. Các quyết định cần Claude PM xác nhận
 
-1. **Chấp thuận mô hình vận hành Semi-Automated qua Dashboard:** Đồng ý để người vận hành sử dụng Web UI Dashboard (`http://127.0.0.1:8080`) để duyệt video và can thiệp ảnh sạch trong giai đoạn đầu?
-2. **Phê duyệt phương án cứu Sản phẩm 6:** Cho phép thực hiện 1 lần tạo lại cảnh 2 & 3 cho Mực Rim Me Nha Trang bằng Google Flow với prompt chống watermark mới?
-3. **Tiêu chí cutover tự động:** Đồng ý chỉ kích hoạt Windows Task Scheduler chạy ngầm sau khi đã hoàn tất 3 video duyệt/ngày và nghiệm thu xong ca tự chuyển sản phẩm khi có lỗi?
+1. **Đồng thuận tiêu chí đánh giá Affiliate (Chấp nhận sai sót nhỏ):** Thống nhất quan điểm đánh giá và review: đây là công cụ affiliate cá nhân thực chiến, không over-engineer hay cầu toàn thẩm mỹ như TVC thương hiệu lớn, ưu tiên tốc độ ra video hàng ngày và giữ QC `low`.
+2. **Chấp thuận mô hình vận hành Semi-Automated qua Dashboard:** Đồng ý để người vận hành sử dụng Web UI Dashboard (`http://127.0.0.1:8080`) để duyệt video và can thiệp ảnh sạch trong giai đoạn đầu?
+3. **Phê duyệt phương án cứu Sản phẩm 6:** Cho phép thực hiện 1 lần tạo lại cảnh 2 & 3 cho Mực Rim Me Nha Trang bằng Google Flow với prompt chống watermark mới?
+4. **Tiêu chí cutover tự động:** Đồng ý chỉ kích hoạt Windows Task Scheduler chạy ngầm sau khi đã hoàn tất 3 video duyệt/ngày và nghiệm thu xong ca tự chuyển sản phẩm khi có lỗi?
