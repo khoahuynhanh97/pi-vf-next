@@ -25,7 +25,8 @@ from tools.spaiauto.intake_parser import _fold, _xlsx_rows
 from tools.spaiauto.storage import atomic_json, digest, read_json
 from tools.spaiauto.links import link_kind, normalize_market_url
 
-SHEETS = ("1gZud8PjalrF493toqlniKOeh8XPCw73B7ZpQ7FLHT-Y", "1QdGMCdADxYXCAY02aLSILX9FX_XF_cTLULvOKCvzOho")
+SHEETS = ("10w1QAOuq8zvjnK4Rml8qgVIoIMtz_1iDlZohoMQDnWQ", "1QdGMCdADxYXCAY02aLSILX9FX_XF_cTLULvOKCvzOho")
+PREVIOUS_SHEET_1 = "1gZud8PjalrF493toqlniKOeh8XPCw73B7ZpQ7FLHT-Y"
 MAX_SHEET_SELECTION = 20
 POOL_FIELDS = "candidate_id product_name source_url platform shop_name category brand_hint requested_variant price_hint_vnd original_price_hint_vnd sold_hint rating_hint rating_count_hint shop_type_hint commission_percent_hint trend_reason video_concept risk_notes observed_at source_refs_json state selected_batch_id selection_reason".split()
 SELECTED_FIELDS = "product_name source_url category candidate_id platform brand_hint requested_variant price_hint_vnd selection_rank selection_reason video_concept script_draft claims_to_verify source_refs_json observed_at".split()
@@ -125,8 +126,9 @@ def _pool_lock(pool: Path):
     finally:
         lock.unlink(missing_ok=True)
 
-def normalize_sources(sources: list[tuple[str, Path]], previous_pool: Path | None = None) -> list[dict]:
-    if len(sources) != 2 or {sid for sid, _ in sources} != set(SHEETS):
+def normalize_sources(sources: list[tuple[str, Path]], previous_pool: Path | None = None,
+                      *, expected_sheet_ids: tuple[str, ...] = SHEETS) -> list[dict]:
+    if len(sources) != 2 or {sid for sid, _ in sources} != set(expected_sheet_ids):
         raise ValueError("Both configured Sheet IDs and snapshots are required; partial sync is not implicit.")
     previous_rows = _read_pool(previous_pool) if previous_pool and previous_pool.exists() else []
     candidates: dict[str, dict] = {}

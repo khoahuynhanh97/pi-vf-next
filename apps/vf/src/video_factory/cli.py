@@ -2353,14 +2353,40 @@ def cmd_recover_keyframe(args: argparse.Namespace) -> int:
     """Recover one quarantined keyframe after reconciliation or proven pre-Send failure."""
     conn = connect(_resolve_db_path(args.db_path))
     try:
-        result = recover_unknown_keyframe_submission(
-            conn,
-            workflow_id=args.workflow_id,
-            owner_user_id=args.owner_user_id,
-            authorization=None,
-            operation_id=args.operation_id,
-            replacement_note=args.replace_unretrievable_output,
-        )
+        try:
+            result = recover_unknown_keyframe_submission(
+                conn,
+                workflow_id=args.workflow_id,
+                owner_user_id=args.owner_user_id,
+                authorization=None,
+                operation_id=args.operation_id,
+                replacement_note=args.replace_unretrievable_output,
+                provider_mode=getattr(args, "provider_mode", "configured"),
+            )
+        except ValueError as exc:
+            if getattr(args, "advance", False):
+                result = {
+                    "workflow_id": args.workflow_id,
+                    "status": "unknown",
+                    "action": "reconciling",
+                    "error": str(exc),
+                }
+            else:
+                raise
+        if getattr(args, "advance", False):
+            from video_factory.automation.coordinator import ProductVideoCoordinator
+            from video_factory.automation.creative_cli import _advance_until
+            coord = ProductVideoCoordinator(connection=conn, db_path=_resolve_db_path(args.db_path))
+            pm = getattr(args, "provider_mode", "configured")
+            adv_res, _ = _advance_until(
+                coord,
+                args.workflow_id,
+                advance=lambda wid: coord.advance_creative(wid, provider_mode=pm),
+                success_action="stop",
+                max_ticks=100,
+                emit_progress=True,
+            )
+            result["advance"] = adv_res
         print(json.dumps(result, ensure_ascii=False))
         return 0
     except Exception as exc:  # noqa: BLE001
@@ -3020,6 +3046,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_recover.add_argument("workflow_id", help="Workflow ID (positional)")
     p_recover.add_argument("--operation-id", required=True, help="Targeted keyframe operation ID to replace")
+    p_recover.add_argument("--provider-mode", choices=["configured", "fake"], default="configured", help="Keyframe provider mode")
+    p_recover.add_argument("--advance", action="store_true", help="Advance workflow to completion in the same process")
     p_recover.add_argument("--replace-unretrievable-output", metavar="NOTE",
                            help="Authorize one replacement after the Flow output lookup budget is exhausted")
     p_recover.add_argument("--owner-user-id", default="local-owner")

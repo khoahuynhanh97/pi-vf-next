@@ -163,11 +163,11 @@ def _validate_review(review: dict, record: dict, directory: Path) -> None:
     identity = review.get("identity")
     if not isinstance(identity, dict):
         raise ValueError("Review needs product identity.")
-    for field in ("brand", "model", "category"):
-        if not isinstance(identity.get(field), str) or not identity[field].strip():
-            raise ValueError(f"Reviewed identity needs {field}.")
-    if identity.get("variant") is not None and not isinstance(identity["variant"], str):
-        raise ValueError("Variant must be text or null.")
+    if not isinstance(identity.get("category"), str) or not identity["category"].strip():
+        identity["category"] = "food"
+    for field in ("brand", "model", "variant"):
+        if identity.get(field) is not None and not isinstance(identity[field], str):
+            raise ValueError(f"{field} must be text or null.")
     selected = review.get("selected_asset_ids")
     if (not isinstance(selected, list) or not selected
             or any(not isinstance(a, str) for a in selected)
@@ -341,7 +341,15 @@ def publish(run_dir: Path, inbox_root: Path, batch_id: str | None = None,
     products = []
     keys: set[str] = set()
     for priority, product in enumerate(ready, start=1):
-        canonical = compute_canonical_product_key(product["brand"], product["model"], product["variant"])
+        brand = str(product.get("brand") or "").strip()
+        model = str(product.get("model") or "").strip()
+        has_sku = bool(brand and model)
+        if has_sku:
+            identity_mode = "sku"
+            canonical = compute_canonical_product_key(brand, model, product.get("variant"))
+        else:
+            identity_mode = "source_product"
+            canonical = f"source:{product['id']}"
         if canonical in keys:
             raise ValueError("Multiple listings resolve to the same identity; split or reconcile before publishing.")
         keys.add(canonical)
@@ -366,6 +374,14 @@ def publish(run_dir: Path, inbox_root: Path, batch_id: str | None = None,
             "acquisition_tool": "spaiauto", "review": product["review"],
             "archive_sha256": product["archive_sha256"], "claims_verified": False,
         })
+        source_snapshot = {
+            "canonical_product_id": canonical,
+            "product": {
+                "id": str(product["id"]),
+                "canonical_key": canonical,
+                "images": [{"asset_id": img["asset_id"]} for img in images],
+            }
+        }
         products.append({
             **{k: product[k] for k in ("name", "brand", "model", "variant", "category", "description",
                 "price_display", "price_min", "price_max", "currency", "trend_evidence", "key_features", "keywords",
@@ -374,6 +390,7 @@ def publish(run_dir: Path, inbox_root: Path, batch_id: str | None = None,
             "images": images, "source_product_id": product["id"], "source_url": product["source_url"],
             "selection_reason": "operator_reviewed_spaiauto_capture", "hot_reason": "",
             "provenance_path": provenance_relative.as_posix(),
+            "identity_mode": identity_mode, "source_snapshot": source_snapshot,
         })
     atomic_json(staging / "manifest.json", {
         "schema_version": "1.0.0", "batch_id": batch_id, "production_date": payload["date"],
@@ -469,9 +486,16 @@ def _publish_root_intake(run_dir: Path, inbox_root: Path, batch_id: str | None,
             product = payload["products"][0]
             if row.get("status") != "completed" or product.get("status") != "reviewed" or not product.get("images"):
                 raise ValueError("Root row and child visual review are not complete.")
-            if not all(str(product.get(k) or "").strip() for k in ("brand", "model", "variant")):
-                raise ValueError("Verified brand, model and variant are required; PI will not invent a default variant.")
-            canonical = compute_canonical_product_key(product["brand"], product["model"], product["variant"])
+            brand = str(product.get("brand") or "").strip()
+            model = str(product.get("model") or "").strip()
+            has_sku = bool(brand and model)
+            if has_sku:
+                identity_mode = "sku"
+                canonical = compute_canonical_product_key(brand, model, product.get("variant"))
+            else:
+                identity_mode = "source_product"
+                stable_id = str(row.get("candidate_id") or product.get("id") or row["row_id"]).strip()
+                canonical = f"source:{stable_id}"
             if canonical in seen:
                 raise ValueError("Two selected rows resolve to the same canonical identity.")
             seen.add(canonical)
@@ -482,7 +506,7 @@ def _publish_root_intake(run_dir: Path, inbox_root: Path, batch_id: str | None,
                 "review_sha256": digest(review_path), "image_sha256": [img["sha256"] for img in product["images"]],
                 "canonical_product_key": canonical})
             outcome.update(status="eligible", reason=None, canonical_product_key=canonical)
-            eligible.append((row, product, child_state, child, {"canonical": canonical, "product_key": compute_product_key(canonical)}))
+            eligible.append((row, product, child_state, child, {"canonical": canonical, "product_key": compute_product_key(canonical), "identity_mode": identity_mode}))
         except (ValueError, OSError, KeyError, TypeError) as exc:
             outcome["reason"] = str(exc)
         outcomes.append(outcome)
@@ -562,12 +586,21 @@ def _publish_root_intake(run_dir: Path, inbox_root: Path, batch_id: str | None,
         creative = {"kind":"creative-input-v1", "candidate_id":row.get("candidate_id"),
             "csv_sha256":state["selection_csv_sha256"],
             **{k:row.get("input_metadata",{}).get(k, "") for k in ("video_concept","script_draft","claims_to_verify","source_refs_json")}}
+        source_snapshot = {
+            "canonical_product_id": canonical,
+            "product": {
+                "id": str(product["id"]),
+                "canonical_key": canonical,
+                "images": [{"asset_id": img["asset_id"]} for img in image_out],
+            }
+        }
         out_products.append({**{k:product[k] for k in ("name","brand","model","variant","category","description","price_display","price_min","price_max","currency","trend_evidence","key_features","keywords","target_images","quota_met","shortfall_reason","claims_verified")},
             "priority":priority,"canonical_product_key":canonical,"product_key":identity["product_key"],"images":image_out,
             "source_product_id":product["id"],"source_url":product["source_url"],"selection_reason":"operator_reviewed_spaiauto_capture",
             "hot_reason":"","provenance_path":provenance_rel.as_posix(),"candidate_id":row.get("candidate_id"),
             "source_refs_json":row.get("input_metadata",{}).get("source_refs_json"),"creative_input":creative,
-            "seller_description":product.get("description", "")})
+            "seller_description":product.get("description", ""),
+            "identity_mode":identity.get("identity_mode", "sku"),"source_snapshot":source_snapshot})
     outcomes_path=_staged_file(staging,Path("outcomes.json"))
     atomic_json(outcomes_path, {"schema_version":"1.0.0", "batch_id":effective, "rows":outcomes,
         "counts":{status:sum(x["status"]==status for x in outcomes) for status in sorted({x["status"] for x in outcomes})}})

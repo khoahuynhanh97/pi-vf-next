@@ -1883,6 +1883,7 @@ def recover_unknown_keyframe_submission(
     authorization: dict[str, Any] | None = None,
     expected_version: int | None = None,
     replacement_note: str | None = None,
+    provider_mode: str | None = None,
 ) -> dict[str, Any]:
     """Reconcile an unknown call or replace a proven pre-Send failure for one frame."""
     import hashlib
@@ -1945,7 +1946,7 @@ def recover_unknown_keyframe_submission(
     if not row or row["state"] != "quarantined":
         raise ValueError("No quarantined storyboard job to recover")
     uncertain_submission = any(
-        code in last_error for code in ("NETWORK_UNKNOWN_OUTCOME", "RECONCILIATION_REQUIRED")
+        code in last_error for code in ("NETWORK_UNKNOWN_OUTCOME", "RECONCILIATION_REQUIRED", "GOOGLE_FLOW_KEYFRAME_TIMEOUT", "OUTPUT_RECONCILIATION_EXHAUSTED", "GOOGLE_FLOW_OUTPUT_NOT_RETRIEVED")
     )
     known_invalid_output = "GOOGLE_FLOW_OUTPUT_ASPECT_RATIO_UNSUPPORTED" in last_error
     presend_failure_codes = (
@@ -1960,6 +1961,7 @@ def recover_unknown_keyframe_submission(
         "GOOGLE_FLOW_916_UNVERIFIED",
         "GOOGLE_FLOW_SETTINGS_SAVE_SELECTOR_NOT_UNIQUE",
         "GOOGLE_FLOW_REFERENCE_ASSET_NOT_UNIQUE",
+        "FLOW_UPLOAD_CONSENT_REQUIRED",
     )
     presend_failure_code = next(
         (code for code in presend_failure_codes if code in last_error), None
@@ -2034,17 +2036,23 @@ def recover_unknown_keyframe_submission(
             raise ValueError("A replacement note of 1–1000 characters is required")
         metadata = json.loads(target_row["provider_metadata_json"] or "{}")
         attempts = metadata.get("output_reconciliation_attempts")
-        finished = metadata.get("output_reconciliation_finished_attempt") == attempts
+        finished_attempts = int(metadata.get("output_reconciliation_finished_attempt") or 0)
+        finished = finished_attempts >= MAX_OUTPUT_RECONCILIATION_ATTEMPTS
         if not finished and metadata.get("output_reconciliation_last_attempt_at"):
-            # Earlier poll receipts recorded the claim time and saved the result separately.
             last_claim = datetime.fromisoformat(metadata["output_reconciliation_last_attempt_at"])
             saved_at = datetime.fromisoformat(target_row["updated_at"]).replace(tzinfo=timezone.utc)
-            finished = saved_at > last_claim
+            finished = (saved_at > last_claim) and (type(attempts) is int and attempts >= MAX_OUTPUT_RECONCILIATION_ATTEMPTS and finished_attempts >= MAX_OUTPUT_RECONCILIATION_ATTEMPTS)
+        is_timeout_or_exhausted = target_row["error_code"] in (
+            "GOOGLE_FLOW_KEYFRAME_TIMEOUT", "OUTPUT_RECONCILIATION_EXHAUSTED",
+        )
+        exhausted_poll_budget = finished
+        valid_stop_condition = exhausted_poll_budget or (is_timeout_or_exhausted and finished)
+
         if (not uncertain_submission or target_row["provider_kind"] != "google_flow"
                 or target_row["status"] != "unknown" or target_row["output_path"]
                 or not target_row["provider_operation_id"] or metadata.get("send_attempted") is not True
-                or target_row["error_code"] != "GOOGLE_FLOW_OUTPUT_NOT_RETRIEVED"
-                or type(attempts) is not int or attempts < MAX_OUTPUT_RECONCILIATION_ATTEMPTS or not finished):
+                or target_row["error_code"] not in ("GOOGLE_FLOW_OUTPUT_NOT_RETRIEVED", "OUTPUT_RECONCILIATION_EXHAUSTED", "GOOGLE_FLOW_KEYFRAME_TIMEOUT")
+                or not valid_stop_condition):
             raise ValueError("An unknown Flow operation with no output and an exhausted poll budget is required")
         abandonment = {
             "note": note, "provider_outcome": "unknown", "output_reconciliation_attempts": attempts,
@@ -2115,7 +2123,8 @@ def recover_unknown_keyframe_submission(
 
     store = KeyframeOperationStore(connection)
     try:
-        provider, _ = resolve_keyframe_provider(get_workspace_layout().root / "keyframes")
+        wf_provider_mode = str(provider_mode or (workflow[0].get("creative_policy") or {}).get("provider_mode") or workflow[0].get("provider_mode") or "")
+        provider, _ = resolve_keyframe_provider(get_workspace_layout().root / "keyframes", provider_mode=wf_provider_mode)
     except Exception:
         from video_factory.integrations.google_flow_keyframe_provider import (
             GoogleFlowKeyframeProvider,
@@ -2166,6 +2175,23 @@ def recover_unknown_keyframe_submission(
         )
         if _stable_request_digest(target_request) != target_row["request_digest"]:
             raise ValueError("Quarantined keyframe request does not match the submitted request digest")
+        capacity_store = ProviderCapacityStore(connection)
+        lease_owner = f"operator_reconcile_{owner_user_id}_{target_op_id}"
+        acquired = capacity_store.try_acquire(
+            provider_kind=provider_kind,
+            operation_id=target_op_id,
+            lease_owner=lease_owner,
+            limit=1,
+            profile_id=str(getattr(provider, "profile_id", "") or ""),
+            reconciliation_only=True,
+        )
+        if not acquired:
+            raise ValueError(f"Provider capacity for reconciliation on operation '{target_op_id}' could not be acquired")
+        if provider_id:
+            capacity_store.bind_provider_operation(provider_kind, target_op_id, provider_id)
+        if hasattr(provider, "lease_owner"):
+            provider.lease_owner = lease_owner
+
         reconcile_output = getattr(provider, "reconcile_existing_output", None)
         result = (
             reconcile_output(target_request, provider_id)
@@ -2388,11 +2414,12 @@ def recover_unknown_keyframe_submission(
                 "FROM video_factory_provider_capacity WHERE provider_kind=? AND operation_id=?",
                 (provider_kind, target_op_id),
             ).fetchone()
-            if slot is None or slot["provider_operation_id"] != provider_id:
-                raise ValueError("Provider capacity slot is missing or bound to a different operation")
-            if (slot["lease_expires_at"] > datetime.now(timezone.utc).timestamp()
-                    or process_lease_owner_alive(slot["lease_owner"])):
-                raise ValueError("The old Flow operation still has an active lease")
+            if slot is not None:
+                if slot["provider_operation_id"] != provider_id:
+                    raise ValueError("Provider capacity slot is missing or bound to a different operation")
+                if (slot["lease_expires_at"] > datetime.now(timezone.utc).timestamp()
+                        or process_lease_owner_alive(slot["lease_owner"])):
+                    raise ValueError("The old Flow operation still has an active lease")
             connection.execute(
                 """UPDATE workflow_qc_retries SET status='abandoned_unknown',
                    action_taken='operator_abandoned_unretrievable_output', reason_text=?, updated_at=?
@@ -2605,7 +2632,7 @@ def confirm_keyframe_submission(
         raise ValueError(f"Quarantined job is '{job_name}', expected 'product_video.storyboard'")
 
     last_err = str(outbox_row["last_error"] or "")
-    if not any(code in last_err for code in ("NETWORK_UNKNOWN_OUTCOME", "RECONCILIATION_REQUIRED")):
+    if not any(code in last_err for code in ("NETWORK_UNKNOWN_OUTCOME", "RECONCILIATION_REQUIRED", "GOOGLE_FLOW_KEYFRAME_TIMEOUT", "OUTPUT_RECONCILIATION_EXHAUSTED")):
         raise ValueError("Quarantined storyboard job last_error indicates a deterministic error, not an uncertain outcome")
 
     outbox_id_to_requeue = int(outbox_row["outbox_id"])
@@ -2806,7 +2833,7 @@ def record_terminal_keyframe_outcome(
     ).fetchone()
     if not outbox or outbox["state"] != "quarantined" or not any(
         code in str(outbox["last_error"] or "")
-        for code in ("NETWORK_UNKNOWN_OUTCOME", "RECONCILIATION_REQUIRED")
+        for code in ("NETWORK_UNKNOWN_OUTCOME", "RECONCILIATION_REQUIRED", "GOOGLE_FLOW_KEYFRAME_TIMEOUT", "OUTPUT_RECONCILIATION_EXHAUSTED")
     ):
         raise ValueError("No quarantined uncertain storyboard operation is available to reconcile")
     envelope = json.loads(outbox["message"])

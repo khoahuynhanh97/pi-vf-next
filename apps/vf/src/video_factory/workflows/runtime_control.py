@@ -117,11 +117,53 @@ def workflow_can_advance_during_capacity_wait(connection: sqlite3.Connection, wo
     aggregate = json.loads(row[0])
     if aggregate.get("state") in {"AwaitingFinalApproval", "exporting"}:
         return True
+
+    # If all scene clips for this workflow's active render batch are completed on disk with matching SHA, allow immediate advance
+    tables = {r[0] for r in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    if {"video_factory_scene_operation", "video_factory_render_batches"} <= tables:
+        batch_id_val = str(aggregate.get("active_render_job_id") or "")
+        batch_row = None
+        if batch_id_val:
+            batch_row = connection.execute(
+                "SELECT render_batch_id, scene_count, project_id FROM video_factory_render_batches WHERE render_batch_id=?",
+                (batch_id_val,),
+            ).fetchone()
+        if not batch_row:
+            batch_row = connection.execute(
+                "SELECT render_batch_id, scene_count, project_id FROM video_factory_render_batches WHERE workflow_id=? ORDER BY created_at DESC LIMIT 1",
+                (workflow_id,),
+            ).fetchone()
+        expected_project_id = aggregate.get("project_id")
+        if (
+            batch_row
+            and int(batch_row["scene_count"] or 0) >= 1
+            and (not expected_project_id or not batch_row["project_id"] or batch_row["project_id"] == expected_project_id)
+        ):
+            scenes = connection.execute(
+                """SELECT scene_id, status, output_path, output_sha256
+                   FROM video_factory_scene_operation
+                   WHERE render_batch_id=? ORDER BY scene_order""",
+                (batch_row["render_batch_id"],),
+            ).fetchall()
+            if len(scenes) == int(batch_row["scene_count"]) and all(
+                s["status"] == "completed" and s["output_path"] and Path(str(s["output_path"])).is_file()
+                and str(s["output_sha256"] or "").removeprefix("sha256:").lower() == hashlib.sha256(Path(str(s["output_path"])).read_bytes()).hexdigest().lower()
+                for s in scenes
+            ):
+                return True
+
     batch_id = str(aggregate.get("active_render_job_id") or "")
     if aggregate.get("state") != "rendering" or not batch_id.startswith("batch_"):
         return False
     storyboard = aggregate.get("latest_artifact") or aggregate.get("storyboard") or {}
     provider = str((storyboard.get("backend_profile") or {}).get("provider_kind") or "")
+    if not provider and "video_factory_scene_operation" in tables:
+        scene_row = connection.execute(
+            "SELECT provider_kind FROM video_factory_scene_operation WHERE render_batch_id=? LIMIT 1",
+            (batch_id,),
+        ).fetchone()
+        if scene_row:
+            provider = str(scene_row[0] or "")
     if not provider:
         return False
     evidence = verified_render_finalization_checkpoint(connection, workflow_id, batch_id, provider)
@@ -278,11 +320,38 @@ def _resume_capacity_wait(connection: sqlite3.Connection, pause: dict[str, Any])
         if connection.execute("SELECT 1 FROM video_factory_provider_capacity LIMIT 1").fetchone():
             return pause
         for table in ("video_factory_keyframe_operation", "video_factory_scene_operation"):
-            if table in tables and connection.execute(
-                f"SELECT 1 FROM {table} WHERE status IN "
-                "('unknown','submitting','project_created','submitted','running') LIMIT 1"
-            ).fetchone():
-                return pause
+            if table not in tables:
+                continue
+            if table == "video_factory_keyframe_operation":
+                columns = {row[1] for row in connection.execute(f"PRAGMA table_info({table})")}
+                has_meta = "provider_metadata_json" in columns
+                meta_cond = "OR COALESCE(CAST(json_extract(provider_metadata_json, '$.output_reconciliation_attempts') AS INTEGER), 0) >= 3" if has_meta else ""
+                has_blocker = connection.execute(
+                    f"""SELECT 1 FROM {table}
+                        WHERE status IN ('submitting','project_created','submitted','running')
+                           OR (status = 'unknown' AND NOT (
+                               error_code IN (
+                                   'OUTPUT_RECONCILIATION_EXHAUSTED', 'GOOGLE_FLOW_KEYFRAME_TIMEOUT',
+                                   'GOOGLE_FLOW_AUTH_REQUIRED', 'GOOGLE_FLOW_AUTH_UNVERIFIED',
+                                   'GOOGLE_FLOW_PROJECT_URL_MISMATCH', 'GOOGLE_FLOW_PROJECT_ACCESS_FAILED',
+                                   'FLOW_PROJECT_CHECKPOINT_INVALID'
+                               )
+                               {meta_cond}
+                           ))
+                        LIMIT 1"""
+                ).fetchone()
+                if has_blocker:
+                    return pause
+            else:
+                if connection.execute(
+                    f"""SELECT 1 FROM {table} AS op
+                        WHERE op.status IN ('unknown','submitting','project_created','submitted','running')
+                          AND EXISTS (
+                              SELECT 1 FROM video_factory_provider_capacity AS slot
+                              WHERE slot.operation_id = op.operation_id AND slot.provider_kind = op.provider_kind
+                          ) LIMIT 1"""
+                ).fetchone():
+                    return pause
         if "flow_ui_lease" in tables and any(
             lease[1] > time.time() or process_lease_owner_alive(lease[0])
             for lease in connection.execute("SELECT owner, expires_at FROM flow_ui_lease")

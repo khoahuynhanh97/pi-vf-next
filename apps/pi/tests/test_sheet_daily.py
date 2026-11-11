@@ -5,7 +5,8 @@ import json
 import pytest
 from openpyxl import Workbook
 
-from tools.selection_handoff import SHEETS
+from tools import sheet_snapshot
+from tools.selection_handoff import PREVIOUS_SHEET_1, SHEETS
 from tools.sheet_daily import run_daily
 
 
@@ -20,8 +21,9 @@ def _workbook(shop, item):
     return output.getvalue()
 
 
-def test_daily_replay_reuses_selection_batch_intake_and_ack(tmp_path):
-    workbooks = {SHEETS[0]: _workbook(11, 22), SHEETS[1]: _workbook(33, 44)}
+@pytest.mark.parametrize("sheet_1", [SHEETS[0], PREVIOUS_SHEET_1])
+def test_daily_replay_reuses_selection_batch_intake_and_ack(tmp_path, monkeypatch, sheet_1):
+    workbooks = {sheet_1: _workbook(11, 22), SHEETS[1]: _workbook(33, 44)}
     selection_calls = []
 
     def complete(messages):
@@ -33,7 +35,10 @@ def test_daily_replay_reuses_selection_batch_intake_and_ack(tmp_path):
 
     kwargs = {"root": tmp_path / "daily", "day": "2026-11-02", "db_path": tmp_path / "test.db",
               "fetch": lambda sheet_id: workbooks[sheet_id], "complete": complete, "candidate_limit": 1}
-    first = run_daily(**kwargs)
+    with monkeypatch.context() as previous_config:
+        previous_config.setattr(sheet_snapshot, "SHEETS", (sheet_1, SHEETS[1]))
+        first = run_daily(**kwargs)
+    kwargs["fetch"] = lambda _: pytest.fail("Replay must use the original snapshots")
     second = run_daily(**kwargs)
 
     assert first == second

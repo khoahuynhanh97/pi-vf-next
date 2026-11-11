@@ -104,13 +104,17 @@ def test_quarantine_inactive_flow_scene_preserves_unconfirmed_submit(tmp_path: P
         assert capacity.active("google_flow") == []
 
 
-def test_operator_can_retry_one_reconciled_flow_timeout(tmp_path: Path) -> None:
+@pytest.mark.parametrize("inaccessible", [False, True])
+def test_operator_can_retry_one_reconciled_flow_timeout(tmp_path: Path, inaccessible: bool) -> None:
+    from video_factory.integrations.capacity import ProviderCapacityStore
+
     image = tmp_path / "start.png"
     image.write_bytes(b"keyframe")
     request = _request(image)
     project = "https://flow.google.com/project/00000000-0000-0000-0000-000000000001"
     with sqlite3.connect(":memory:") as connection:
         store = SceneRenderOperationStore(connection)
+        capacity = ProviderCapacityStore(connection)
         store.mark_planned(request, render_batch_id="batch-1", scene_order=1)
         with connection:
             connection.execute(
@@ -120,16 +124,43 @@ def test_operator_can_retry_one_reconciled_flow_timeout(tmp_path: Path) -> None:
             )
         with pytest.raises(ValueError, match="evidence"):
             store.retry_reconciled_flow_scene(request.request_id, reconciliation_evidence="")
-        retry = store.retry_reconciled_flow_scene(
-            request.request_id, reconciliation_evidence="Project contains only START; credit activity verified."
-        )
+        if inaccessible:
+            with connection:
+                connection.execute(
+                    "UPDATE video_factory_scene_operation SET status='submitted', error_code='' WHERE operation_id=?",
+                    (request.request_id,),
+                )
+                connection.execute(
+                    "INSERT INTO video_factory_provider_capacity VALUES (?, ?, ?, ?, ?, ?)",
+                    ("google_flow", request.request_id, "", "0:inactive", 0, project),
+                )
+            evidence = {"project_url": project, "reconciliation_evidence": "New account redirects to /404"}
+            with pytest.raises(ValueError, match="exact inaccessible"):
+                store.replace_inaccessible_flow_scene(
+                    request.request_id, **{**evidence, "project_url": project[:-1] + "2"}
+                )
+            with connection:
+                connection.execute("UPDATE video_factory_provider_capacity SET lease_expires_at=4102444800")
+            with pytest.raises(ValueError, match="active Flow lease"):
+                store.replace_inaccessible_flow_scene(request.request_id, **evidence)
+            with connection:
+                connection.execute("UPDATE video_factory_provider_capacity SET lease_expires_at=0")
+            retry = store.replace_inaccessible_flow_scene(request.request_id, **evidence)
+            assert store.replace_inaccessible_flow_scene(request.request_id, **evidence) == retry
+            assert capacity.active("google_flow") == []
+        else:
+            retry = store.retry_reconciled_flow_scene(
+                request.request_id, reconciliation_evidence="Project contains only START; credit activity verified."
+            )
         assert retry["provider_kind"] == "google_flow"
         assert retry["attempt"] == 2
         assert retry["status"] == "planned"
         assert retry["provider_operation_id"] is None
         assert store.request_from_record(retry) == replace(request, request_id=retry["operation_id"])
         assert store.get(request.request_id)["provider_operation_id"] == project
-        assert store.get(request.request_id)["error_code"] == "OPERATOR_RECONCILED_FAILED"
+        assert store.get(request.request_id)["error_code"] == (
+            "OPERATOR_FLOW_PROJECT_INACCESSIBLE" if inaccessible else "OPERATOR_RECONCILED_FAILED"
+        )
 
 
 def test_compile_scene_uses_only_generated_keyframe_and_excludes_overlay_text(

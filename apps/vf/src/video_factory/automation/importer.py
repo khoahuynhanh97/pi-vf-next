@@ -498,12 +498,17 @@ def publish_daily_run_to_exchange(
         name = str(p.get("name") or f"{brand} {model}").strip()
 
         # Handle canonical key
-        try:
-            canonical_key = compute_canonical_product_key(brand, model, variant)
-            pkey = compute_product_key(canonical_key)
-        except Exception:  # noqa: BLE001
-            canonical_key = f"unknown:{idx}"
-            pkey = f"invalid_{idx}"
+        identity_mode = str(p.get("identity_mode") or "sku")
+        if identity_mode == "source_product":
+            canonical_key = str(p.get("canonical_product_key") or f"source:{p.get('source_product_id') or p.get('id') or idx}")
+            pkey = str(p.get("product_key") or compute_product_key(canonical_key))
+        else:
+            try:
+                canonical_key = compute_canonical_product_key(brand, model, variant)
+                pkey = compute_product_key(canonical_key)
+            except Exception:  # noqa: BLE001
+                canonical_key = f"unknown:{idx}"
+                pkey = f"invalid_{idx}"
 
         if canonical_key in seen_batch_keys or pkey in seen_batch_keys:
             continue
@@ -530,7 +535,11 @@ def publish_daily_run_to_exchange(
                 continue  # Skip this product
 
             # Basic admission validation
-            if not name or not brand or not model:
+            if identity_mode == "source_product":
+                if not name:
+                    master_repo.mark_rejected(canonical_key, "MISSING_REQUIRED_FIELDS")
+                    continue
+            elif not name or not brand or not model:
                 master_repo.mark_rejected(canonical_key, "MISSING_REQUIRED_FIELDS")
                 continue
 
@@ -542,14 +551,15 @@ def publish_daily_run_to_exchange(
                 master_repo.mark_rejected(canonical_key, "URL_LIKE_NAME")
                 continue
 
-            if _PRICE_LIKE_MODEL.match(model):
-                master_repo.mark_rejected(canonical_key, "PRICE_LIKE_MODEL")
-                continue
+            if identity_mode == "sku":
+                if _PRICE_LIKE_MODEL.match(model):
+                    master_repo.mark_rejected(canonical_key, "PRICE_LIKE_MODEL")
+                    continue
 
-            # Check for promotional noise in model
-            if _PROMOTIONAL_NOISE_MODEL.search(model):
-                master_repo.mark_rejected(canonical_key, "PROMOTIONAL_NOISE_MODEL")
-                continue
+                # Check for promotional noise in model
+                if _PROMOTIONAL_NOISE_MODEL.search(model):
+                    master_repo.mark_rejected(canonical_key, "PROMOTIONAL_NOISE_MODEL")
+                    continue
 
             # Check for ranking list pattern in name
             if _RANKING_LIST_PATTERN.match(name):
@@ -624,6 +634,15 @@ def publish_daily_run_to_exchange(
                 "source_product_id": str(p.get("id") or f"prod_{idx:02d}"),
                 "source_url": p.get("pdp_url") or (trend_evidence[0]["url"] if trend_evidence else None),
                 "selection_reason": p.get("hot_reason"),
+                "identity_mode": identity_mode,
+                "source_snapshot": p.get("source_snapshot") or {
+                    "canonical_product_id": canonical_key,
+                    "product": {
+                        "id": str(p.get("id") or f"prod_{idx:02d}"),
+                        "canonical_key": canonical_key,
+                        "images": [{"asset_id": img["asset_id"]} for img in images_out],
+                    },
+                },
             }
         )
         admitted_count += 1

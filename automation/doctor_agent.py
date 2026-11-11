@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import fnmatch
 import glob
 import json
 import logging
@@ -129,9 +130,10 @@ class DoctorAgent:
         return token, chat_id
 
     def clean_stale_locks(self, max_age_seconds: int = 300) -> list[str]:
-        """Remove dangling .lock files older than threshold."""
+        """Remove dangling file-existence lock files older than threshold, preserving OS-level locks."""
         removed: list[str] = []
         now_ts = time.time()
+        os_lock_patterns = ("*.json.lock", "sheet-*.lock", "scheduler_ledger.json.lock")
         lock_patterns = [
             RUNTIME_DIR / "vf" / "*.lock",
             RUNTIME_DIR / "vf" / ".*.lock",
@@ -140,6 +142,10 @@ class DoctorAgent:
         for pat in lock_patterns:
             for lf in glob.glob(str(pat), recursive=True):
                 lp = Path(lf)
+                name = lp.name
+                if any(fnmatch.fnmatch(name, p) for p in os_lock_patterns):
+                    # Preserve OS file locks managed by exclusive_file_lock
+                    continue
                 try:
                     if now_ts - lp.stat().st_mtime > max_age_seconds:
                         lp.unlink(missing_ok=True)
@@ -168,6 +174,15 @@ class DoctorAgent:
                 )
                 if c.rowcount > 0:
                     actions.append(f"Đã giải phóng {c.rowcount} outbox lease bị hết hạn trong hermes.db")
+
+            if "video_factory_keyframe_operation" in tables:
+                c.execute(
+                    "UPDATE video_factory_keyframe_operation SET status = 'unknown' "
+                    "WHERE status = 'failed' AND error_code IN ('KEYFRAME_TIMEOUT_EXPIRED', 'GOOGLE_FLOW_KEYFRAME_TIMEOUT') "
+                    "AND COALESCE(provider_operation_id, '') != ''"
+                )
+                if c.rowcount > 0:
+                    actions.append(f"Đã chuyển {c.rowcount} keyframe timeout về trạng thái 'unknown' để đối soát/cứu tự động")
 
             conn.commit()
             conn.close()

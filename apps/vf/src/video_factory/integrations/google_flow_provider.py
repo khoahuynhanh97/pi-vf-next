@@ -25,7 +25,12 @@ from video_factory.integrations.ports import (
     VideoGenerationResult,
 )
 from video_factory.job_contracts import TerminalJobError
-from video_factory.integrations.flow_ui_recipe import ensure_manual_mode, configure_manual_generation, unique
+from video_factory.integrations.flow_ui_recipe import (
+    FlowUploadConsentRequired,
+    configure_manual_generation,
+    ensure_manual_mode,
+    unique,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -389,7 +394,13 @@ class GoogleFlowBrowserPage:
             if marker not in page.locator("body").inner_text():
                 raise RuntimeError("GOOGLE_FLOW_REQUEST_MARKER_NOT_SAVED")
             displayed_cost = self._configure_project(page, request)
-            self._attach_start_frame(page, source)
+            try:
+                self._attach_start_frame(page, source)
+            except FlowUploadConsentRequired as exc:
+                return VideoGenerationResult(
+                    request_id=request.request_id, status="failed", provider_operation_id=project_url,
+                    error_code=exc.code, error_message=str(exc), metadata={"send_attempted": False},
+                )
             return self._generate(page, request, project_url, displayed_cost)
 
     def _assert_start_frame(self, page: Any) -> None:

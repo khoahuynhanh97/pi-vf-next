@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import logging
 import os
+import time
 import re
 from pathlib import Path
 from typing import Any
@@ -26,7 +27,9 @@ class FlowOutputAspectRatioError(RuntimeError):
     """Google Flow returned a decoded image that is not native portrait output."""
 
 KEYFRAME_NEGATIVE_PROMPT = (
-    "watermark, text, seller logo, marketplace badge, price tag, promotional frame, "
+    "promotional text, banner text, overlay typography, sale badge, floating letters, "
+    "advertising slogan, graphic overlay, discount badge, store watermark, commercial text overlay, "
+    "non-packaging text, text outside product label, marketplace UI, seller watermark, shop logo, "
     "blurry, low quality, morphing product, distorted structural integrity, "
     "warped LCD screen, altered form factor, deformed hardware, missing components"
 )
@@ -85,6 +88,7 @@ class GoogleFlowKeyframeProvider(KeyframeGenerationPort):
         self.cost_contract_verified = bool(cost_contract_verified)
         self.store = store
         self.on_project_created = on_project_created
+        self.lease_owner = None
 
     def bind_operation_store(self, store: Any) -> None:
         self.store = store
@@ -163,9 +167,14 @@ class GoogleFlowKeyframeProvider(KeyframeGenerationPort):
     def _compose_generation_prompt(
         cls, prompt: str, aspect_ratio: str, anatomy_text: str
     ) -> str:
+        clean_text_guideline = (
+            "Clean realistic environment without graphic banners, marketing badges, or floating promotional text. "
+            "Ignore all seller banners, discount tags and watermarks from reference photos. "
+            "Only preserve authentic text and logos directly printed on the product's physical packaging and label."
+        )
         full_prompt = f"{prompt}\n{anatomy_text}".strip() if anatomy_text else prompt
         ratio_instruction = cls._ASPECT_RATIO_PROMPT.replace("9:16", aspect_ratio)
-        return f"{full_prompt}\n{ratio_instruction}".strip()
+        return f"{full_prompt}\n{clean_text_guideline}\n{ratio_instruction}".strip()
 
     def _preflight(
         self, request: KeyframeGenerationRequest
@@ -391,7 +400,7 @@ class GoogleFlowKeyframeProvider(KeyframeGenerationPort):
         return locator.first
 
     @staticmethod
-    def _assert_authenticated(page: Any) -> None:
+    def _assert_authenticated(page: Any, timeout_ms: int = 10_000) -> None:
         authenticated = any(
             page.query_selector(selector) is not None
             for selector in (
@@ -405,7 +414,7 @@ class GoogleFlowKeyframeProvider(KeyframeGenerationPort):
         composer = page.locator("div.ProseMirror:visible")
         if "/project/" in str(getattr(page, "url", "")):
             try:
-                composer.first.wait_for(state="visible", timeout=10_000)
+                composer.first.wait_for(state="visible", timeout=min(10_000, max(500, timeout_ms)))
             except Exception:
                 pass
         if (settings.count() == 1 and settings.first.is_visible()
@@ -416,7 +425,7 @@ class GoogleFlowKeyframeProvider(KeyframeGenerationPort):
         # also direct evidence that this browser reached the authenticated app.
         workspace_action = page.locator("button.new-project-button:visible")
         try:
-            workspace_action.first.wait_for(state="visible", timeout=10_000)
+            workspace_action.first.wait_for(state="visible", timeout=min(10_000, max(500, timeout_ms)))
         except Exception:
             pass
         if workspace_action.count() == 0:
@@ -424,7 +433,7 @@ class GoogleFlowKeyframeProvider(KeyframeGenerationPort):
                 "button:has-text('Dự án mới'):visible, button:has-text('New project'):visible"
             )
             try:
-                workspace_action.first.wait_for(state="visible", timeout=5_000)
+                workspace_action.first.wait_for(state="visible", timeout=min(5_000, max(500, timeout_ms)))
             except Exception:
                 pass
         if workspace_action.count() == 1 and workspace_action.first.is_visible():
@@ -545,11 +554,21 @@ class GoogleFlowKeyframeProvider(KeyframeGenerationPort):
         *,
         initial_sources: set[str],
         expected_source: str | None = None,
+        deadline: float | None = None,
     ) -> None:
         """Poll for generated image tile and download the full-res output."""
+        def _rem_ms(min_ms: int = 1000) -> int:
+            if deadline is None:
+                return min_ms
+            rem = int((deadline - time.monotonic()) * 1000)
+            return max(min_ms, rem)
+
         poll_seconds = min(self.timeout_seconds, 30.0) if expected_source else self.timeout_seconds
         for _ in range(max(1, int(poll_seconds // 3))):
-            page.wait_for_timeout(3000)
+            if deadline is not None and time.monotonic() >= deadline:
+                raise RuntimeError("GOOGLE_FLOW_KEYFRAME_TIMEOUT")
+            wait_step = min(3000, _rem_ms(min_ms=250))
+            page.wait_for_timeout(wait_step)
             tiles = page.locator("flow-image-tile")
             if tiles.count() == 0:
                 tiles = page.locator("flow-tile-container, flow-media-tile, flow-generation-tile, .image-tile")
@@ -630,8 +649,9 @@ class GoogleFlowKeyframeProvider(KeyframeGenerationPort):
                                             if row.count() == 1 and row.first.is_visible()
                                             else label
                                         )
-                                        with page.expect_download(timeout=15000) as download_info:
-                                            click_target.click(timeout=3000)
+                                        dl_timeout = min(15000, _rem_ms(min_ms=1000))
+                                        with page.expect_download(timeout=dl_timeout) as download_info:
+                                            click_target.click(timeout=min(3000, _rem_ms(min_ms=500)))
                                         download = download_info.value
                                         download.save_as(str(output_file))
                                         break
@@ -648,8 +668,9 @@ class GoogleFlowKeyframeProvider(KeyframeGenerationPort):
                             page.wait_for_timeout(1000)
                             full_downloads = page.locator('button[aria-label*="Tải xuống" i], button[aria-label*="Download" i]')
                             if full_downloads.count() == 1 and full_downloads.first.is_visible():
-                                with page.expect_download(timeout=15000) as download_info:
-                                    full_downloads.first.click()
+                                dl_timeout = min(15000, _rem_ms(min_ms=1000))
+                                with page.expect_download(timeout=dl_timeout) as download_info:
+                                    full_downloads.first.click(timeout=min(3000, _rem_ms(min_ms=500)))
                                 download = download_info.value
                                 download.save_as(str(output_file))
                                 break
@@ -698,7 +719,7 @@ class GoogleFlowKeyframeProvider(KeyframeGenerationPort):
         return reference_sources, generated_sources[0]
 
     def reconcile_existing_output(
-        self, request: KeyframeGenerationRequest, project_url: str,
+        self, request: KeyframeGenerationRequest, project_url: str, *, lease_owner: str | None = None,
     ) -> KeyframeGenerationResult:
         """Poll/download only the already-checkpointed Flow project; never Generate."""
         project_url = str(project_url or "").strip()
@@ -714,10 +735,21 @@ class GoogleFlowKeyframeProvider(KeyframeGenerationPort):
                 error_code="OUTPUT_RECONCILIATION_UNAVAILABLE",
                 error_message="Durable operation store is required for bounded output reconciliation",
             )
+        import time
+        start_time = time.monotonic()
+        total_timeout = float(self.timeout_seconds)
+        deadline = start_time + total_timeout
+
+        def _remaining_timeout_ms(min_ms: int = 1000) -> int:
+            rem = int((deadline - time.monotonic()) * 1000)
+            return max(min_ms, rem)
+
         attempt = None
         output_file = self._output_path(request.operation_id)
         temp_file = output_file.with_name(output_file.stem + ".download.tmp")
         try:
+            if time.monotonic() >= deadline:
+                raise RuntimeError("GOOGLE_FLOW_KEYFRAME_TIMEOUT")
             if not self.profile_path or not self.profile_path.is_dir():
                 raise RuntimeError("GOOGLE_FLOW_PROFILE_UNAVAILABLE")
             if any((self.profile_path / name).exists() for name in ("SingletonLock", "SingletonCookie", "SingletonSocket")):
@@ -733,17 +765,35 @@ class GoogleFlowKeyframeProvider(KeyframeGenerationPort):
                 browser = p.chromium.launch_persistent_context(
                     user_data_dir=str(self.profile_path), headless=self.headless,
                     channel="chrome", args=args, accept_downloads=True,
+                    timeout=_remaining_timeout_ms(),
                 )
                 try:
+                    if time.monotonic() >= deadline:
+                        raise RuntimeError("GOOGLE_FLOW_KEYFRAME_TIMEOUT")
                     page = browser.pages[0] if browser.pages else browser.new_page()
-                    page.goto(project_url, timeout=self.timeout_seconds * 1000)
+                    page.goto(project_url, timeout=_remaining_timeout_ms())
                     current_url = str(getattr(page, "url", "")).rstrip("/")
                     if current_url != project_url.rstrip("/"):
                         raise RuntimeError("GOOGLE_FLOW_PROJECT_URL_MISMATCH")
-                    self._assert_authenticated(page)
-                    attempt = self.store.claim_output_reconciliation(
-                        request.operation_id, project_url, max_attempts=MAX_OUTPUT_RECONCILIATION_ATTEMPTS,
-                    )
+                    try:
+                        self._assert_authenticated(page, timeout_ms=_remaining_timeout_ms())
+                    except TypeError:
+                        self._assert_authenticated(page)
+                    owner = lease_owner or getattr(self, "lease_owner", None)
+                    try:
+                        attempt = self.store.claim_output_reconciliation(
+                            request.operation_id, project_url, max_attempts=MAX_OUTPUT_RECONCILIATION_ATTEMPTS,
+                            lease_owner=owner,
+                        )
+                    except Exception as exc:
+                        if "CAPACITY" in str(exc) or "LEASE" in str(exc):
+                            return KeyframeGenerationResult(
+                                request.operation_id, "unknown", provider_operation_id=project_url,
+                                error_code="PROVIDER_CAPACITY_WAIT",
+                                error_message=f"Reconciliation slot lease busy: {exc}",
+                                metadata={"provider_kind": self.provider_kind, "project_url": project_url},
+                            )
+                        raise
                     if attempt is None:
                         return KeyframeGenerationResult(
                             request.operation_id, "unknown", provider_operation_id=project_url,
@@ -753,16 +803,20 @@ class GoogleFlowKeyframeProvider(KeyframeGenerationPort):
                         )
                     reference_sources: set[str] = set()
                     generated_source = None
-                    for _ in range(max(1, int(self.timeout_seconds // 3))):
+                    while time.monotonic() < deadline:
                         reference_sources, generated_source = self._existing_project_sources(page, request)
                         if generated_source:
                             break
-                        page.wait_for_timeout(3000)
+                        wait_ms = min(3000, _remaining_timeout_ms(min_ms=500))
+                        page.wait_for_timeout(wait_ms)
                     if not generated_source:
+                        if time.monotonic() >= deadline:
+                            raise RuntimeError("GOOGLE_FLOW_KEYFRAME_TIMEOUT")
                         raise RuntimeError("GOOGLE_FLOW_OUTPUT_NOT_RETRIEVED")
                     self._download_generated_output(
                         page, temp_file, initial_sources=reference_sources,
                         expected_source=generated_source,
+                        deadline=deadline,
                     )
                 finally:
                     browser.close()
@@ -790,6 +844,8 @@ class GoogleFlowKeyframeProvider(KeyframeGenerationPort):
             error = str(exc)
             if "GOOGLE_FLOW_OUTPUT_INVALID" in error:
                 code = "GOOGLE_FLOW_OUTPUT_INVALID"
+            elif "GOOGLE_FLOW_KEYFRAME_TIMEOUT" in error:
+                code = "GOOGLE_FLOW_KEYFRAME_TIMEOUT"
             elif attempt is None:
                 known_preflight = (
                     "GOOGLE_FLOW_AUTH_UNVERIFIED", "GOOGLE_FLOW_AUTH_REQUIRED",

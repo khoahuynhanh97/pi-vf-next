@@ -71,6 +71,15 @@ class ProductVideoCoordinator:
         self.importer = ExchangeImporter(inbox_root)
         self.import_repo = DailyImportRepository(connection)
         self.workflow_repo = WorkflowRepository(connection)
+        if db_path is None:
+            try:
+                cur = connection.execute("PRAGMA database_list")
+                for row in cur.fetchall():
+                    if row[1] == "main" and row[2]:
+                        db_path = Path(row[2])
+                        break
+            except Exception:
+                pass
         self.db_path = db_path
         self.catalog_candidates_path = Path(catalog_candidates_path) if catalog_candidates_path else None
 
@@ -2203,6 +2212,13 @@ class ProductVideoCoordinator:
                 provider_mode=provider_mode,
                 payload=adv_payload,
             )
+        if agg['state'] == ProductVideoWorkflowState.CREATING_STORYBOARD.value:
+            res = self._resume_keyframe_quarantine(workflow_id, agg, version)
+            if res is not None:
+                if res.get('action') == 'requeued':
+                    version += 1
+                else:
+                    return res
         if agg['state'] == ProductVideoWorkflowState.RENDERING.value:
             outbox = self.connection.execute(
                 "SELECT outbox_id, state, attempt_count, last_error, message FROM workflow_outbox "
@@ -2415,10 +2431,305 @@ class ProductVideoCoordinator:
                         known_product_failure=True)
                     return {'workflow_id':workflow_id,'state':'skipped','action':'skipped',
                         'reason':reason}
+                if current['state'] == ProductVideoWorkflowState.CREATING_STORYBOARD.value:
+                    op_row = self.connection.execute(
+                        "SELECT operation_id, status, provider_metadata_json, error_code "
+                        "FROM video_factory_keyframe_operation "
+                        "WHERE workflow_id=? AND provider_kind='google_flow' ORDER BY updated_at DESC LIMIT 1",
+                        (workflow_id,),
+                    ).fetchone()
+                    if op_row and (
+                        op_row['status'] == 'unknown'
+                        or (op_row['status'] == 'failed' and str(op_row['error_code'] or '') in ('KEYFRAME_TIMEOUT_EXPIRED', 'GOOGLE_FLOW_KEYFRAME_TIMEOUT'))
+                    ):
+                        meta = {}
+                        try:
+                            meta = json.loads(op_row['provider_metadata_json'] or '{}')
+                        except Exception:
+                            pass
+                        attempts = int(meta.get('output_reconciliation_attempts') or 0)
+                        finished_attempts = int(meta.get('output_reconciliation_finished_attempt') or 0)
+                        err_code = str(op_row['error_code'] or '')
+                        non_reconcilable_errors = (
+                            'FLOW_PROJECT_CHECKPOINT_INVALID', 'GOOGLE_FLOW_AUTH_REQUIRED',
+                            'GOOGLE_FLOW_AUTH_UNVERIFIED', 'GOOGLE_FLOW_PROJECT_URL_MISMATCH',
+                            'GOOGLE_FLOW_PROJECT_ACCESS_FAILED', 'GOOGLE_FLOW_PROFILE_UNAVAILABLE',
+                            'GOOGLE_FLOW_PROFILE_BUSY',
+                        )
+                        polls_exhausted = (finished_attempts >= 3)
+                        if not polls_exhausted and int(current.get('keyframe_recovery_attempt', 0) or 0) < 1:
+                            if err_code not in non_reconcilable_errors:
+                                return {'workflow_id': workflow_id, 'state': current['state'], 'action': 'worker_tick'}
                 return {'workflow_id':workflow_id,'state':current['state'],
                     'action':'quarantined',
                     'failed':report.failed if report else None,'last_error':outbox['last_error']}
         return {'workflow_id':workflow_id, 'state':current['state'],'action':'worker_tick','failed':report.failed if report else None}
+
+    def _resume_keyframe_quarantine(self, workflow_id: str, agg: dict[str, Any] | None = None, version: int | None = None) -> dict[str, Any] | None:
+        if agg is None or version is None:
+            data = self.workflow_repo.get_workflow(workflow_id)
+            if data is None:
+                return None
+            agg, version = data
+
+        outbox = self.connection.execute(
+            "SELECT outbox_id, state, attempt_count, last_error, message FROM workflow_outbox "
+            "WHERE workflow_id=? ORDER BY outbox_id DESC LIMIT 1",
+            (workflow_id,),
+        ).fetchone()
+        bound_storyboard = False
+        if outbox is not None:
+            try:
+                envelope = json.loads(outbox['message'])
+                if isinstance(envelope, str):
+                    envelope = json.loads(envelope)
+                payload = envelope.get('payload') or {}
+                bound_storyboard = (
+                    (payload.get('job_name') == 'product_video.storyboard'
+                     or envelope.get('type') in ('storyboard', 'product_video.storyboard')
+                     or payload.get('type') in ('storyboard', 'product_video.storyboard')
+                     or envelope.get('job_name') == 'product_video.storyboard')
+                    and (payload.get('workflow_id') == workflow_id or envelope.get('workflow_id') == workflow_id)
+                )
+            except (TypeError, ValueError, json.JSONDecodeError):
+                pass
+        last_error = str(outbox['last_error'] or '') if outbox is not None else ''
+        uncertain_keyframe = (
+            bound_storyboard
+            and outbox['state'] == 'quarantined'
+            and any(code in last_error for code in (
+                'RECONCILIATION_REQUIRED', 'OUTPUT_RECONCILIATION_EXHAUSTED',
+                'GOOGLE_FLOW_KEYFRAME_TIMEOUT', 'GOOGLE_FLOW_OUTPUT_NOT_RETRIEVED',
+                'OUTPUT_RECONCILIATION',
+            ))
+        )
+        if not uncertain_keyframe:
+            return None
+
+        op_row = self.connection.execute(
+            "SELECT operation_id, frame_id, status, provider_operation_id, provider_kind, "
+            "provider_metadata_json, error_code FROM video_factory_keyframe_operation "
+            "WHERE workflow_id=? AND provider_kind='google_flow' ORDER BY updated_at DESC LIMIT 1",
+            (workflow_id,),
+        ).fetchone()
+        if not (op_row and (op_row['status'] == 'unknown' or (op_row['status'] == 'failed' and str(op_row['error_code'] or '') in ('KEYFRAME_TIMEOUT_EXPIRED', 'GOOGLE_FLOW_KEYFRAME_TIMEOUT'))) and op_row['provider_operation_id']):
+            return None
+
+        meta = {}
+        try:
+            meta = json.loads(op_row['provider_metadata_json'] or '{}')
+        except Exception:
+            meta = {}
+        attempts = int(meta.get('output_reconciliation_attempts') or 0)
+        finished_attempts = int(meta.get('output_reconciliation_finished_attempt') or 0)
+        err_code = str(op_row['error_code'] or '')
+        non_reconcilable_errors = (
+            'FLOW_PROJECT_CHECKPOINT_INVALID', 'GOOGLE_FLOW_AUTH_REQUIRED',
+            'GOOGLE_FLOW_AUTH_UNVERIFIED', 'GOOGLE_FLOW_PROJECT_URL_MISMATCH',
+            'GOOGLE_FLOW_PROJECT_ACCESS_FAILED', 'GOOGLE_FLOW_PROFILE_UNAVAILABLE',
+            'GOOGLE_FLOW_PROFILE_BUSY',
+        )
+        if err_code in non_reconcilable_errors:
+            return {
+                'workflow_id': workflow_id,
+                'state': agg['state'],
+                'action': 'quarantined',
+                'reason': op_row['error_message'] or err_code,
+                'code': err_code,
+                'operation_id': op_row['operation_id'],
+            }
+
+        polls_exhausted = (finished_attempts >= 3)
+        if not polls_exhausted:
+            from video_factory.workflows.outbox_repository import OutboxRepository
+            with self.connection:
+                self.connection.execute(
+                    "UPDATE workflow_outbox SET max_attempts = max(max_attempts, attempt_count + 1) "
+                    "WHERE outbox_id=?", (int(outbox['outbox_id']),)
+                )
+                OutboxRepository(self.connection).requeue_quarantined_in_transaction(
+                    int(outbox['outbox_id']), preserve_attempts=True,
+                )
+            return {'workflow_id': workflow_id, 'state': agg['state'], 'action': 'requeued'}
+
+        from video_factory.integrations.capacity import ProviderCapacityStore
+        capacity = ProviderCapacityStore(self.connection)
+        with self.connection:
+            self.connection.execute("BEGIN IMMEDIATE")
+            if not self.connection.execute(
+                "SELECT 1 FROM workflow_outbox WHERE outbox_id=? AND state='quarantined' AND message=?",
+                (outbox['outbox_id'], outbox['message']),
+            ).fetchone():
+                return {'workflow_id': workflow_id, 'state': agg['state'], 'action': 'worker_tick'}
+            released = capacity.release_exhausted_reconciliation_slot(
+                provider_kind='google_flow',
+                operation_id=op_row['operation_id'],
+                in_transaction=True,
+            )
+            if not released:
+                return {
+                    'workflow_id': workflow_id,
+                    'state': agg['state'],
+                    'action': 'quarantined',
+                    'reason': 'Google Flow session still alive or lease active; slot retained',
+                    'code': op_row['error_code'] or 'OUTPUT_RECONCILIATION_EXHAUSTED',
+                    'operation_id': op_row['operation_id'],
+                }
+
+            budget_exhausted = bool(agg.get("budget_exhausted"))
+            qc_auth = agg.get("qc_authorization") or {}
+            max_cost = qc_auth.get("workflow_max_cost_usd")
+            if max_cost is not None and float(agg.get("total_cost_usd", 0.0) or 0.0) >= float(max_cost):
+                budget_exhausted = True
+
+            if budget_exhausted:
+                from video_factory.workflows.runtime_control import skip_unresolved_workflow
+                reason = f"KEYFRAME_BUDGET_EXHAUSTED: workflow reached budget limit of {max_cost} USD"
+                skip_unresolved_workflow(self.connection, workflow_id, reason, known_product_failure=False)
+                return {
+                    'workflow_id': workflow_id,
+                    'state': 'skipped',
+                    'action': 'skipped',
+                    'reason': reason,
+                    'operation_id': op_row['operation_id'],
+                }
+
+            if int(agg.get("keyframe_recovery_attempt", 0) or 0) >= 1:
+                reason = f"FLOW_KEYFRAME_REPLACEMENT_EXHAUSTED: replacement operation {op_row['operation_id']} also unknown after reconciliation"
+                self.connection.execute(
+                    """UPDATE video_factory_keyframe_operation
+                       SET status='abandoned_unknown',
+                           error_code='FLOW_KEYFRAME_REPLACEMENT_EXHAUSTED',
+                           error_message=?,
+                           updated_at=CURRENT_TIMESTAMP
+                       WHERE operation_id=? AND status='unknown'""",
+                    (reason, op_row['operation_id']),
+                )
+                agg["state"] = "skipped"
+                agg["skip_reason"] = reason
+                agg["failure_reason"] = reason
+                from video_factory.workflows.repository import WorkflowRepository
+                WorkflowRepository(self.connection).commit_workflow(
+                    workflow_id=workflow_id,
+                    aggregate_json=json.dumps(agg),
+                    events=[{
+                        "event_id": f"evt_keyframe_recovery_exhausted_{workflow_id}",
+                        "command_id": f"cmd_keyframe_recovery_exhausted_{workflow_id}",
+                        "event_type": "KeyframeRecoveryExhausted",
+                        "timestamp": datetime.now(timezone.utc).isoformat(),
+                        "payload": {
+                            "quarantined_outbox_id": int(outbox['outbox_id']),
+                            "unknown_operation_id": op_row['operation_id'],
+                            "recovery_attempt": int(agg.get("keyframe_recovery_attempt", 0) or 0),
+                        },
+                    }],
+                    expected_version=version,
+                    in_transaction=True,
+                )
+                self.connection.execute(
+                    "UPDATE workflow_outbox SET state='quarantined', last_error=?, attempt_count=max_attempts WHERE outbox_id=?",
+                    (reason, int(outbox['outbox_id'])),
+                )
+                return {
+                    'workflow_id': workflow_id,
+                    'state': 'skipped',
+                    'action': 'skipped',
+                    'reason': reason,
+                    'operation_id': op_row['operation_id'],
+                }
+
+            target_frame_id = op_row['frame_id'] if 'frame_id' in op_row.keys() and op_row['frame_id'] else 'scene_1-start'
+            rec_attempt = int(agg.get("keyframe_recovery_attempt", 0) or 0) + 1
+            new_plan = {
+                "frames": [
+                    {
+                        "frame_id": target_frame_id,
+                        "actions": ["regenerate_keyframe"],
+                        "feedback": f"Auto-recreate after Flow unknown outcome for {op_row['operation_id']}",
+                    }
+                ]
+            }
+            meta["auto_replacement"] = {
+                "replaced_at": datetime.now(timezone.utc).isoformat(),
+                "reason": op_row['error_code'] or "OUTPUT_RECONCILIATION_EXHAUSTED",
+                "previous_project_url": op_row['provider_operation_id'],
+                "previous_operation_id": op_row['operation_id'],
+                "recovery_attempt": rec_attempt,
+                "target_frame_id": target_frame_id,
+            }
+
+            raw_msg = json.loads(outbox['message'])
+            if isinstance(raw_msg, str):
+                raw_msg = json.loads(raw_msg)
+            msg_payload = raw_msg.setdefault("payload", {})
+            msg_kwargs = msg_payload.setdefault("kwargs", {})
+            msg_kwargs["recovery_plan"] = new_plan
+            msg_kwargs["recovery_attempt"] = rec_attempt
+            raw_msg["idempotency_key"] = f"idemp_product_video.storyboard_auto_recovery_{workflow_id}_a{rec_attempt}"
+            new_msg_str = json.dumps(raw_msg)
+
+            agg["keyframe_recovery_attempt"] = rec_attempt
+            agg["keyframe_recovery_plan"] = new_plan
+            agg["state"] = ProductVideoWorkflowState.CREATING_STORYBOARD.value
+
+            from video_factory.workflows.repository import WorkflowRepository
+            updated = self.connection.execute(
+                """UPDATE video_factory_keyframe_operation
+                   SET status='abandoned_unknown',
+                       error_code='AUTO_REPLACED_UNRETRIEVABLE_OUTPUT',
+                       error_message=?,
+                       provider_metadata_json=?,
+                       updated_at=CURRENT_TIMESTAMP
+                   WHERE operation_id=? AND status='unknown' AND provider_operation_id=?""",
+                (
+                    f"Auto-replaced after reconciliation exhausted; old URL: {op_row['provider_operation_id']}",
+                    json.dumps(meta),
+                    op_row['operation_id'],
+                    op_row['provider_operation_id'],
+                )
+            )
+            if updated.rowcount != 1:
+                raise RuntimeError('Flow keyframe operation changed during recovery')
+            WorkflowRepository(self.connection).commit_workflow(
+                workflow_id=workflow_id,
+                aggregate_json=json.dumps(agg),
+                events=[{
+                    "event_id": f"evt_auto_keyframe_recovery_{workflow_id}_a{rec_attempt}",
+                    "command_id": f"cmd_auto_keyframe_recovery_{workflow_id}_a{rec_attempt}",
+                    "event_type": "UnknownKeyframeReplacementAuthorized",
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                    "payload": {
+                        "quarantined_outbox_id": int(outbox['outbox_id']),
+                        "unknown_operation_ids": [op_row['operation_id']],
+                        "recovery_attempt": rec_attempt,
+                        "target_frame_id": target_frame_id,
+                    },
+                }],
+                expected_version=version,
+                in_transaction=True,
+            )
+            self.connection.execute(
+                """UPDATE workflow_outbox
+                   SET message = ?,
+                       state = 'pending',
+                       attempt_count = 0,
+                       next_attempt_at = NULL,
+                       last_error = NULL,
+                       lease_token = NULL,
+                       lease_owner = NULL,
+                       lease_expires_at = NULL,
+                       max_attempts = max(max_attempts, attempt_count + 1),
+                       updated_at = CURRENT_TIMESTAMP
+                   WHERE outbox_id = ?""",
+                (new_msg_str, int(outbox['outbox_id'])),
+            )
+            return {'workflow_id': workflow_id, 'state': agg['state'], 'action': 'requeued'}
+
+    def _resume_quarantine_for_workflow(self, workflow_id: str) -> dict[str, Any]:
+        res = self._resume_keyframe_quarantine(workflow_id)
+        if res is not None:
+            return res
+        return self.advance_creative(workflow_id)
 
     def _resume_verified_storyboard_quarantine(self, workflow_id: str):
         """Resume only a render quarantined by the superseded storyboard content gate."""

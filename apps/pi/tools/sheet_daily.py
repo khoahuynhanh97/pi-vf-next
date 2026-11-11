@@ -13,7 +13,7 @@ if hasattr(sys.stdout, "reconfigure"):
 if hasattr(sys.stderr, "reconfigure"):
     sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 
-from tools.selection_handoff import (MAX_SHEET_SELECTION, SHEETS, _pool_lock, _read_pool, apply_import_ack,
+from tools.selection_handoff import (MAX_SHEET_SELECTION, _pool_lock, _read_pool, apply_import_ack,
                                      normalize_sources, publish_selection, write_pool)
 from tools.sheet_selection_agent import _complete, select_from_pool
 from tools.sheet_snapshot import download_snapshots, fetch_public_xlsx
@@ -29,10 +29,10 @@ def run_daily(*, root: Path, day: str, db_path: Path, fetch=fetch_public_xlsx,
         raise ValueError("Day must use YYYY-MM-DD")
     root = root.resolve()
     snapshots = download_snapshots(root / day, fetch=fetch)
-    sources = [(sheet_id, snapshots[sheet_id]) for sheet_id in SHEETS]
+    sources = list(snapshots.items())
     pool = root / "candidate_pool.csv"
     with _pool_lock(pool):
-        rows = normalize_sources(sources, pool if pool.exists() else None)
+        rows = normalize_sources(sources, pool if pool.exists() else None, expected_sheet_ids=tuple(snapshots))
         write_pool(pool, rows)
         atomic_json(pool.with_name(pool.stem + ".sources.json"), {"sources": [
             {"sheet_id": sheet_id, "file": f"sources/{sheet_id}_{path.name}",

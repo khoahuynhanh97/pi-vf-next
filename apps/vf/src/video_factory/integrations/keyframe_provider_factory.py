@@ -8,6 +8,7 @@ conditioning provider.
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import Any
 
@@ -35,7 +36,7 @@ def _video_factory_config() -> dict[str, Any]:
 
 
 def resolve_keyframe_provider(output_dir: Path | str, *, image_provider_kind='google_flow',
-                              creative_mode='legacy', muse_adapter=None) -> tuple[KeyframeGenerationPort, str]:
+                              creative_mode='legacy', muse_adapter=None, provider_mode: str | None = None) -> tuple[KeyframeGenerationPort, str]:
     """Return the Google Flow image provider.
 
     Provider selection belongs to video rendering. Image/keyframe generation
@@ -53,6 +54,11 @@ def resolve_keyframe_provider(output_dir: Path | str, *, image_provider_kind='go
         GoogleFlowKeyframeProvider,
     )
 
+    # Configured mode or non-fake mode must strictly use the real Google Flow provider
+    # Mock is only allowed when fake mode is explicitly passed:
+    if provider_mode == "fake" and os.environ.get("VF_TEST_MOCK_FLOW") == "1":
+        from video_factory.integrations.test_flow_mock import TestMockFlowKeyframeProvider
+        return TestMockFlowKeyframeProvider(output_dir=output_dir), _FLOW
     flow = GoogleFlowKeyframeProvider.from_config(output_dir=output_dir)
     if flow.is_available():
         return flow, _FLOW

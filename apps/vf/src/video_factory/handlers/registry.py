@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+
 import hashlib
 import json
 import logging
@@ -478,7 +480,7 @@ def create_product_video_topic_handlers(
                 CapabilityDiscovery().scan(tool_registry).bindings
             )
     if handlers_service is None:
-        if provider_mode == "configured" and keyframe_runtime_factory is None and workflow_repository is not None:
+        if (provider_mode == "configured" or os.environ.get("VF_ENABLE_KEYFRAME_RUNTIME") == "1") and keyframe_runtime_factory is None and workflow_repository is not None:
             from video_factory.integrations.keyframe_provider import (
                 KeyframeOperationStore,
                 KeyframeRuntime,
@@ -502,12 +504,14 @@ def create_product_video_topic_handlers(
                     provider,cap_kind=resolve_keyframe_provider(keyframe_output,image_provider_kind='muse',
                         creative_mode='four_agent',muse_adapter=adapter)
                 else:
-                    provider, cap_kind = resolve_keyframe_provider(keyframe_output)
+                    provider, cap_kind = resolve_keyframe_provider(keyframe_output, provider_mode=provider_mode)
+                from video_factory.integrations.capacity import process_lease_owner
                 return KeyframeRuntime(
                     store=KeyframeOperationStore(workflow_repository.conn),
                     provider=provider,
                     capacity_store=ProviderCapacityStore(workflow_repository.conn),
                     capacity_limit=configured_capacity(cap_kind),
+                    lease_owner=process_lease_owner(),
                 )
         if provider_mode == "configured" and creative_generator is None and workflow_repository is not None:
             from video_factory.handlers.common import create_configured_creative_generator

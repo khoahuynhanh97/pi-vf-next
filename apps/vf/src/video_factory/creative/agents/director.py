@@ -102,6 +102,10 @@ class VisualDirector:
             if bible is not None:
                 for idx, raw in enumerate(data.get('scenes', ()), 1):
                     if isinstance(raw, dict):
+                        if not str(raw.get('environment') or '').strip():
+                            raw['environment'] = bible.environment
+                        if not str(raw.get('lighting') or '').strip():
+                            raw['lighting'] = bible.lighting
                         env = str(raw.get('environment') or '').strip()
                         light = str(raw.get('lighting') or '').strip()
                         if env != bible.environment or light != bible.lighting:
@@ -246,6 +250,8 @@ class VisualDirector:
     def create_scene_prompts(self, dossier, script):
         result = self.port(dossier).generate_json(
             system_prompt='Author a scene-prompt-bundle-v1 JSON. Separate START composition, END change, and video motion. '
+                'Do NOT render any seller overlay text, promotional banners, badges, or watermarks seen in reference photos. '
+                'Surroundings must be completely clean real-world scenes. Only keep authentic typography printed on the physical packaging/label. '
                 'Keep the exact subject_action in video_prompt. Describe its beginning, middle and end across the scene duration. '
                 'START depicts only the initial instant and objects supported by the selected source. '
                 'After the required action sentence, describe only necessary motion and the exact visible inventory. '

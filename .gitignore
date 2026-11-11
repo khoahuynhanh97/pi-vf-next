@@ -6,3 +6,6 @@ data/
 runtime/
 config.toml
 .env
+ 
+graphify-out/
+.agents/

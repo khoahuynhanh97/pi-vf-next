@@ -1583,10 +1583,25 @@ class ProductVideoJobHandlers:
                         )
                     except ValueError as exc:
                         raise StoryboardContractError(str(exc)) from exc
+                    current_wf = (
+                        self.workflow_repository.get_workflow(ctx.workflow_id)
+                        if self.workflow_repository
+                        else None
+                    )
+                    current_agg = current_wf[0] if current_wf else {}
                     recovery_plan = (
                         kwargs.get("recovery_plan")
                         if isinstance(kwargs.get("recovery_plan"), dict)
-                        else None
+                        else (
+                            current_agg.get("keyframe_recovery_plan")
+                            if isinstance(current_agg.get("keyframe_recovery_plan"), dict)
+                            else None
+                        )
+                    )
+                    recovery_attempt = int(
+                        kwargs.get("recovery_attempt", 0)
+                        or current_agg.get("keyframe_recovery_attempt", 0)
+                        or 0
                     )
                     try:
                         if recovery_plan and bundle is not None:
@@ -1601,7 +1616,7 @@ class ProductVideoJobHandlers:
                             prompt_bundle=bundle,
                             backend_profile=profile,
                             recovery_plan=recovery_plan,
-                            recovery_attempt=int(kwargs.get("recovery_attempt", 0) or 0),
+                            recovery_attempt=recovery_attempt,
                             previous_package=(
                                 kwargs.get("previous_storyboard")
                                 if isinstance(kwargs.get("previous_storyboard"), dict)

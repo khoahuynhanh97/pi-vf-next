@@ -34,6 +34,7 @@ from .scene_validator import validate_scene_output
 
 SUPPORTED_SCENE_DURATIONS = frozenset({4, 6, 8})
 MANDATORY_VIDEO_NEGATIVE_PROMPT = (
+    "promotional text, banner text, overlay typography, sale badge, floating letters, advertising graphics, "
     "readable text, captions, subtitles, watermark, seller name, shop name, store logo, "
     "marketplace UI, price tag, rating badge, social handle, shipping label, unrelated brand "
     "mark, source-store branding, malformed product, changed logo, changed product "
@@ -533,9 +534,20 @@ class SceneRenderOperationStore:
             operation_id, reconciliation_evidence=reconciliation_evidence, provider_kind="google_flow",
         )
 
+    def replace_inaccessible_flow_scene(
+        self, operation_id: str, *, project_url: str, reconciliation_evidence: str,
+    ) -> dict[str, Any]:
+        """Retire an inaccessible project locally and start a new attempt on the current account."""
+        if not project_url.strip():
+            raise ValueError("The inaccessible Flow project URL is required")
+        return self._retry_reconciled_flow_scene(
+            operation_id, reconciliation_evidence=reconciliation_evidence,
+            provider_kind="google_flow", inaccessible_project_url=project_url,
+        )
+
     def _retry_reconciled_flow_scene(
         self, operation_id: str, *, reconciliation_evidence: str, provider_kind: str,
-        confirmed_rejection: bool = False,
+        confirmed_rejection: bool = False, inaccessible_project_url: str | None = None,
     ) -> dict[str, Any]:
         """Create a new attempt after confirmed rejection or operator reconciliation."""
         if not confirmed_rejection and not reconciliation_evidence.strip():
@@ -557,7 +569,22 @@ class SceneRenderOperationStore:
                 raise ValueError("Flow operation is not eligible for reconciled recovery")
             if old["output_path"] or old["output_sha256"]:
                 raise ValueError("Flow operation already has output")
-            if provider_kind == "google_flow" and (
+            replacement_code = "OPERATOR_RECONCILED_FAILED"
+            if inaccessible_project_url is not None:
+                replacement_code = "OPERATOR_FLOW_PROJECT_INACCESSIBLE"
+                if old["provider_operation_id"] != inaccessible_project_url or (
+                    old["status"] == "failed" and old["error_code"] != replacement_code
+                ):
+                    raise ValueError("Only the exact inaccessible, unresolved project may be replaced")
+                lease = self.connection.execute(
+                    "SELECT lease_expires_at, lease_owner FROM video_factory_provider_capacity "
+                    "WHERE provider_kind='google_flow' AND operation_id=?",
+                    (operation_id,),
+                ).fetchone()
+                if lease and (float(lease[0]) > datetime.now(timezone.utc).timestamp()
+                              or process_lease_owner_alive(lease[1])):
+                    raise ValueError("An active Flow lease cannot be replaced")
+            elif provider_kind == "google_flow" and (
                 old["status"] != "failed" or old["attempt"] != 1
                 or old["error_code"] not in {"SCENE_TIMEOUT_EXPIRED", "OPERATOR_RECONCILED_FAILED"}
             ):
@@ -571,7 +598,7 @@ class SceneRenderOperationStore:
                 (retry.request_id,),
             ).fetchone()
             if existing:
-                if ((not confirmed_rejection and old["error_code"] != "OPERATOR_RECONCILED_FAILED")
+                if ((not confirmed_rejection and old["error_code"] != replacement_code)
                         or dict(existing)["request_digest"] != retry_digest
                         or dict(existing)["provider_kind"] != provider_kind):
                     raise ValueError("scene recovery conflicts with an existing attempt")
@@ -590,10 +617,15 @@ class SceneRenderOperationStore:
             if not confirmed_rejection:
                 self.connection.execute(
                     "UPDATE video_factory_scene_operation SET status = 'failed', "
-                    "error_code = 'OPERATOR_RECONCILED_FAILED', error_message = ?, updated_at = CURRENT_TIMESTAMP "
+                    "error_code = ?, error_message = ?, updated_at = CURRENT_TIMESTAMP "
                     "WHERE operation_id = ? AND status IN ('submitted', 'running', 'failed')",
-                    (reconciliation_evidence, operation_id),
+                    (replacement_code, reconciliation_evidence, operation_id),
                 )
+                if inaccessible_project_url is not None:
+                    self.connection.execute(
+                        "DELETE FROM video_factory_provider_capacity WHERE provider_kind='google_flow' AND operation_id=?",
+                        (operation_id,),
+                    )
             self.connection.execute(
                 """
                 INSERT INTO video_factory_scene_operation (

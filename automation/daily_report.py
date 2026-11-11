@@ -52,8 +52,9 @@ def _artifact_cost(costs, artifact):
 def _outcome_summary(outcome):
     from video_factory.workflows.steps import _safe_log_text
 
-    return {**{key: outcome.get(key) for key in ("status", "stage", "file_path")},
-            "reason": _safe_log_text(outcome.get("reason"), 500)}
+    base = {key: outcome.get(key) for key in ("status", "stage", "file_path", "operation_id") if outcome.get(key) is not None}
+    base["reason"] = _safe_log_text(outcome.get("reason"), 500)
+    return base
 
 
 def _collect_vf(result, db_path, products, costs):
@@ -73,7 +74,23 @@ def _collect_vf(result, db_path, products, costs):
                 selection = json.loads(saved[0])
                 for key in ("prepared_refs", "resume_refs", "production_selected_refs"):
                     refs.update(dict.fromkeys(selection.get(key, [])))
-        outcomes = {item["workflow_id"]: item for item in result.product_outcomes if item.get("workflow_id")}
+                for item in selection.get("skipped", []):
+                    if isinstance(item, dict) and item.get("workflow_id"):
+                        refs[item["workflow_id"]] = None
+                for item in selection.get("unresolved", []):
+                    if isinstance(item, dict) and item.get("workflow_id"):
+                        refs[item["workflow_id"]] = None
+        outcomes = {}
+        for item in result.product_outcomes:
+            w_id = item.get("workflow_id")
+            if not w_id:
+                continue
+            if w_id in outcomes:
+                prev = outcomes[w_id]
+                if prev.get("status") in ("success", "completed", "reused") and prev.get("receipt_path"):
+                    if item.get("status") in ("skipped", "failed", "waiting"):
+                        continue
+            outcomes[w_id] = item
         unmatched = [item for item in result.product_outcomes if not item.get("workflow_id")]
         batch = result.intake_result.get("exchange_batch_dir")
         manifest_path = Path(batch) / "manifest.json" if batch else None
@@ -155,8 +172,26 @@ def _collect_vf(result, db_path, products, costs):
                 except sqlite3.Error:
                     pass
             product["scene_provider_kinds"] = scene_provider_kinds
+            if not outcome and workflow.get("state") == "completed":
+                exported = workflow.get("export_result") or {}
+                raw_exp = json.loads(exported["payload"]) if isinstance(exported.get("payload"), str) else exported
+                mp4_str = str(raw_exp.get("file_path") or raw_exp.get("video_path") or "")
+                if mp4_str and Path(mp4_str).is_file():
+                    outcome = {
+                        "status": "success",
+                        "stage": "completed",
+                        "file_path": mp4_str,
+                        "reason": "Successfully exported and verified decodable MP4 from current run export receipt",
+                    }
             if outcome:
-                product["outcome"] = _outcome_summary(outcome)
+                current_outcome = product.get("outcome")
+                if current_outcome and current_outcome.get("status") in ("success", "completed", "reused") and current_outcome.get("file_path"):
+                    if outcome.get("status") not in ("success", "completed", "reused"):
+                        pass
+                    else:
+                        product["outcome"] = _outcome_summary(outcome)
+                else:
+                    product["outcome"] = _outcome_summary(outcome)
             if result.provider_mode == "configured":
                 if "product_video_operation_attempt" in tables:
                     columns = {row[1] for row in conn.execute("PRAGMA table_info(product_video_operation_attempt)")}

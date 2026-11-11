@@ -28,6 +28,7 @@ class SkipReason(StrEnum):
     IDENTITY_UNVERIFIED = "identity_unverified"
     BROWSER_ERROR = "browser_error"
     REVIEW_ERROR = "review_error"
+    VARIANT_MISMATCH = "variant_mismatch"
     UNKNOWN = "unknown"
 
 
@@ -312,13 +313,11 @@ def _validate_selection(selection: dict, row: dict) -> str:
     if price is not None:
         if isinstance(price, bool) or not isinstance(price, (int, float)) or not math.isfinite(price) or price < 0:
             raise ValueError("observed_price must be a non-negative number or null.")
-        if row["price_min"] is not None:
+        if row.get("price_min") is not None and row.get("price_max") is not None:
             if row.get("currency") and selection.get("currency") != row["currency"]:
                 raise ValueError("Observed currency does not match the requested price constraint.")
             if not row["price_min"] <= price <= row["price_max"]:
                 raise ValueError("Selected variant price is outside the requested range.")
-    elif row["price_min"] is not None and not str(selection.get("unknown_price_reason", "")).strip():
-        raise ValueError("Requested price cannot be checked; supply unknown_price_reason and retain needs_review.")
     for field in ("brand", "model", "variant"):
         if selection.get(field) is not None and not isinstance(selection[field], str):
             raise ValueError(f"{field} must be text or null; do not invent generic identities.")

@@ -101,7 +101,7 @@ def should_run_today(
         return True, "Forced execution requested"
 
     if not csv_path.is_file():
-        return False, f"CSV file not found: {csv_path}"
+        raise FileNotFoundError(f"CSV file not found: {csv_path}")
 
     date_str = target_date or today_bangkok_str()
     csv_bytes = csv_path.read_bytes()
@@ -143,14 +143,79 @@ def trigger_daily_run(
     if spark_csv is None and not 1 <= limit <= DAILY_VIDEO_LIMIT:
         raise ValueError(f"Sheet limit must be between 1 and {DAILY_VIDEO_LIMIT}")
     sheet_intake = prepare_sheet_intake(target_date, limit, acquire=acquire) if spark_csv is None else None
+    if spark_csv is None and (not sheet_intake or sheet_intake.get("status") in ("error", "waiting") or not (sheet_intake or {}).get("exchange_batches")):
+        records = _load_ledger()
+        prior_run = next(
+            (rec for rec in reversed(records)
+             if rec.get("date") == target_date
+             and rec.get("provider_mode", "fake") == provider_mode
+             and rec.get("status") in ("partial", "waiting", "failed")),
+            None,
+        )
+        if prior_run:
+            from automation.config import PI_RUNS_DIR
+            prior_run_dir = PI_RUNS_DIR / prior_run["run_id"]
+            policy_file = prior_run_dir / "vf-sheet-policy.json"
+            if policy_file.is_file():
+                try:
+                    policy_data = json.loads(policy_file.read_text(encoding="utf-8"))
+                    admitted = policy_data.get("admitted_batches", [])
+                    if admitted and any(Path(b.get("batch_path", "")).is_dir() for b in admitted if isinstance(b, dict) and b.get("batch_path")):
+                        saved_csv = policy_data.get("selection_csv") or str(prior_run_dir / "selection.csv")
+                        sel_csv = Path(saved_csv) if saved_csv else None
+                        sheet_intake = {
+                            "status": "resuming",
+                            "exchange_batches": admitted,
+                            "run_dir": str(prior_run_dir),
+                            "selection_csv": str(sel_csv) if sel_csv and sel_csv.is_file() else None,
+                        }
+                        if not qc_level:
+                            qc_level = policy_data.get("qc_level", "low")
+                except Exception:
+                    pass
+
+    if sheet_intake and sheet_intake.get("status") == "error":
+        err_msg = f"Sheet intake failed for {target_date}: {sheet_intake.get('error') or 'Unknown error'}"
+        res = PipelineRunResult(
+            run_id=f"run_{target_date.replace('-', '')}_sheets_err",
+            status="failed",
+            production_date=target_date,
+            spark_csv="",
+            spark_csv_sha256="",
+            scenes=scenes,
+            limit=limit,
+            provider_mode=provider_mode,
+            started_at=now_bangkok().isoformat(),
+            finished_at=now_bangkok().isoformat(),
+            error=err_msg,
+            intake_result=sheet_intake,
+        )
+        record = ScheduleRecord(
+            date=target_date,
+            csv_sha256="",
+            run_id=res.run_id,
+            status="failed",
+            timestamp=res.finished_at,
+            mp4_count=0,
+            duration_seconds=0.0,
+            error=err_msg,
+            provider_mode=provider_mode,
+            sheet_batches_sha256=None,
+        )
+        record_run(record)
+        return res
+
     ready = (sheet_intake or {}).get("exchange_batches")
     sheet_batches_sha256 = (hashlib.sha256(json.dumps([limit, ready], sort_keys=True).encode()).hexdigest()
                             if isinstance(ready, list) else None)
     selection_csv = (sheet_intake or {}).get("selection_csv") or spark_csv
     if selection_csv is not None:
         csv_p = Path(selection_csv).resolve()
-        needed, reason = should_run_today(csv_p, target_date=target_date, force=force, provider_mode=provider_mode,
-                                         sheet_batches_sha256=sheet_batches_sha256)
+        try:
+            needed, reason = should_run_today(csv_p, target_date=target_date, force=force, provider_mode=provider_mode,
+                                             sheet_batches_sha256=sheet_batches_sha256)
+        except FileNotFoundError as fnf_err:
+            return {"status": "failed", "error": str(fnf_err), "date": target_date, "csv_path": str(csv_p)}
         if not needed:
             return {"status": "skipped", "reason": reason, "date": target_date, "csv_path": str(csv_p)}
 
@@ -178,7 +243,7 @@ def trigger_daily_run(
         sheet_batches_sha256=sheet_batches_sha256,
     )
     record_run(record)
-    if run_res.status not in ("success", "skipped"):
+    if provider_mode == "configured" and run_res.status not in ("success", "skipped"):
         try:
             from automation.doctor_agent import DoctorAgent
             DoctorAgent().handle_pipeline_incident(run_res)

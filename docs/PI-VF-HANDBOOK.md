@@ -1,6 +1,9 @@
 # PI/VF · Sổ tay dự án và onboarding
 
-**Mốc đối chiếu:** 08/11/2026, giờ Bangkok. **Độc giả:** PM, người vận hành, dev mới và coding agent.
+**Mốc đối chiếu:** 11/11/2026, giờ Bangkok. **Độc giả:** PM, người vận hành, dev mới và coding agent.
+
+> [!NOTE]
+> **Nhật ký chi tiết & Trạng thái lỗi hiện tại:** Xem tài liệu đầy đủ tại [`docs/WORKLOG-2026-11-11.md`](WORKLOG-2026-11-11.md)
 
 ## 0. Đọc trước khi nhận việc
 
@@ -20,17 +23,41 @@ Khi bàn giao, ghi rõ checkout, commit/diff, lệnh đã chạy, kết quả th
 
 ## 1. Dự án trong một phút
 
-PI/VF giúp một người vận hành có khoảng **60–90 phút mỗi ngày** tạo video AI dọc cho nội dung TikTok/affiliate. Người dùng đưa danh sách sản phẩm vào Google Sheets. Pipeline chọn sản phẩm, lấy ảnh từ trang bán hàng, viết và dựng video. Người dùng xem MP4 và quyết định video nào dùng được.
+**Phạm vi sản phẩm.** PI/VF là công cụ cá nhân do một người xây và tự dùng. Mục tiêu chính là tự động tạo **video POV để bán sản phẩm**. Video cho người xem thấy sản phẩm và cách dùng hoặc trải nghiệm sản phẩm từ góc nhìn người sử dụng. Chủ công cụ đưa danh sách vào Google Sheets, pipeline lo các bước từ chọn sản phẩm đến xuất MP4, rồi chủ công cụ xem và quyết định video nào dùng được.
 
-**Mục tiêu vận hành:** thường xuyên có khoảng **2–5 video dùng được/ngày**, giảm số phút thao tác tay trên mỗi video duyệt đạt. Đây là mục tiêu sản phẩm, chưa phải năng suất đã đo. Trong thiết kế đích, mỗi sản phẩm đủ đầu vào có workflow riêng và được xử lý tuần tự. Lỗi có thể sửa thì tạo lại đúng ảnh hoặc cảnh lỗi. Hết quota thì ghi lý do và tiếp tục phần còn khả thi, kể cả ghép/xuất video đã đủ clip.
+**Mục tiêu vận hành.** Mỗi ngày cần ít nhất **3 MP4 mới từ 3 sản phẩm khác nhau được chủ công cụ duyệt**, với trần an toàn **20 video/ngày**. Giờ nhận video là **11:30 Bangkok**. Mỗi sản phẩm có workflow riêng và được xử lý tuần tự. Sửa đúng ảnh hoặc cảnh lỗi. Khi một sản phẩm không thể tiếp tục, ghi lý do và chuyển sang phần còn khả thi, kể cả ghép hoặc xuất video đã đủ clip.
 
 | Trong phạm vi | Ngoài phạm vi release đầu |
 | --- | --- |
 | Sheet → ảnh local → kịch bản → keyframe → clip → MP4 và báo cáo | Đăng TikTok/Facebook tự động, affiliate link automation, top-K, TTS/nhạc riêng |
-| Giữ nhận diện sản phẩm, kiểm lỗi có hành động sửa, người dùng duyệt MP4 | Agent tự chọn công cụ, viết lại PI/VF, gộp database hoặc thêm framework |
-| Tối đa hai lần tạo lại **đề xuất** cho mỗi ảnh/clip lỗi đã xác nhận | Ép đủ số sản phẩm mới bắt đầu VF, chấm điểm sáng tạo làm điều kiện release |
+| Giữ nhận diện sản phẩm, kiểm lỗi có hành động sửa, chủ công cụ duyệt MP4 | Nền tảng nhiều người dùng, dashboard phức tạp, agent tự chọn công cụ, viết lại PI/VF, gộp database hoặc thêm framework |
+| Cho phép tạo lại đúng keyframe trong ngân sách. Tối đa hai lần tạo lại **đề xuất** cho mỗi clip lỗi đã xác nhận | Ép đủ số sản phẩm mới bắt đầu VF, chấm điểm sáng tạo làm điều kiện release |
 
-Thiết kế mới hướng tới QC có hành động cụ thể. Hệ thống hiện vẫn có chế độ QC và preproduction observe. Dữ liệu observe và verdict là công cụ chẩn đoán, có thể giữ để so sánh trong giai đoạn chuyển tiếp.
+### 1.1. Tiêu chí video POV
+
+Các mục 1.1–1.3 ghi yêu cầu sản phẩm đã chốt ngày 09/11/2026. Mục 2 trở đi ghi hiện trạng và bằng chứng vận hành tại các mốc đối chiếu.
+
+- **Phân tích sản phẩm trước brief.** Lập thẻ ghi loại và kết cấu, tín hiệu giác quan chính, dạng phục vụ và số lượng, cách dùng tự nhiên, ảnh nguồn làm bằng chứng, thông tin được phép nói và cờ rủi ro render. Ảnh phải chứng minh đặc điểm được thể hiện. Có thể dàn dựng hành động giữ đúng đặc điểm đó. Ví dụ, ảnh thấy nhân cho phép dựng cảnh bẻ lộ nhân. Cảnh nhân chảy cần bằng chứng riêng. Tránh phóng đại, tuyên bố sức khỏe và so sánh tuyệt đối.
+- **Dựng cảnh.** Dùng khoảnh khắc hình ảnh mạnh nhất trong 2 giây đầu và để cảnh chốt bao bì ở cuối. Khung 4 cảnh gợi ý gồm hook, mở bao bì, trải nghiệm và chốt. Với đồ ăn, hướng tới ít nhất 2 cảnh trải nghiệm, kể cả hook nếu có hành động trải nghiệm. Khi thiếu ảnh để dựng cảnh tham vọng, dùng cảnh đơn giản và gắn `low_experiential`. Dưới 2 cảnh trải nghiệm cũng gắn cờ này. Ưu tiên bẻ, hé, nhấc, đổ, nhúng hoặc mặt cắt có căn cứ. Tạm tránh cắn, nhai và tay gần miệng. Giả thuyết các động tác này dễ biến dạng cần kiểm bằng mẫu Flow.
+- **Chữ và đầu ra.** Chèn một dòng hook ngắn bằng ffmpeg sau khi ghép clip, trước QC cuối và trước khi chốt SHA. Đặt chữ trong vùng an toàn, lấy nội dung từ thẻ sản phẩm và bỏ giá khỏi video. Dùng lớp chữ riêng cho hook. Giữ kết quả đánh giá trước và sau khi chèn để đối chiếu. Xuất MP4 dọc 9:16, mở và xem được, có biên nhận kỹ thuật hợp lệ. Caption, hashtag và metadata đăng bài được tạo khi có thể. Thiếu thì gắn cờ và vẫn xuất. Chủ công cụ xem để duyệt hoặc loại, hướng tới khoảng 2 phút/video. Nhạc và link sản phẩm được thêm khi đăng.
+
+### 1.2. QC, duyệt và khôi phục
+
+| Kết quả | Xử lý |
+| --- | --- |
+| `ready`, `ready_with_flags` | Tính vào số video pipeline tạo được sau khi qua kiểm kỹ thuật. Critic `UNKNOWN`, thiếu cảnh trải nghiệm, nhảy ánh sáng và lỗi nối cảnh chỉ gắn cờ ở giai đoạn đầu. |
+| `rejected_hard` | Chỉ dùng khi critic nội dung trả `FAIL` kèm bằng chứng. Ví dụ sai sản phẩm hoặc biến thể, hình ảnh làm hiểu sai sản phẩm, chữ ở tên thương hiệu hoặc tên sản phẩm bị sai hoặc méo, hay chồng hình che sản phẩm. |
+| Lỗi kỹ thuật | MP4 lỗi hoặc biên nhận kỹ thuật thiếu hay không khớp thì chặn xuất và ghi lỗi riêng. |
+
+- `override` áp dụng cho `rejected_hard` do AI chấm nội dung khi file hiện tại vẫn khớp biên nhận kỹ thuật hợp lệ. Chuyển sang `ready_with_flags`, thêm `hard_overridden`, yêu cầu lý do và bỏ qua lượt chấm lại. Lỗi kỹ thuật nằm ngoài phạm vi `override`.
+- `reopen` áp dụng khi file đã sửa hoặc đổi SHA. File mới phải có biên nhận kỹ thuật hợp lệ gắn với SHA mới trước khi trở lại danh sách chờ duyệt. Cả hai lệnh giữ verdict cũ và ghi log thao tác.
+- Báo riêng số video pipeline tạo được và số video chủ công cụ đã duyệt. `--cause` chỉ bắt buộc khi chủ công cụ loại video. Tính thời gian nghỉ 7 ngày theo `product_key` từ lúc duyệt. Ngoại lệ dành cho biến thể có chủ đích. Chỉ thử biến thể khi đã đủ sản lượng tối thiểu, còn ngân sách và sản phẩm đã có tín hiệu. Hướng tới tối đa khoảng 1 biến thể/ngày, đánh giá theo khung kịch bản.
+
+### 1.3. Đợt chạy, giờ nhận và bù sản lượng
+
+- **Tuần đầu đo theo 5 + 5.** Chọn 5 sản phẩm ở đợt đầu từ danh sách đã duyệt. Nếu số sản phẩm có video `ready` hoặc `ready_with_flags` còn dưới mục tiêu lượt chạy, lấy thêm tối đa 5 ở đợt hai. Tối đa 2 đợt và 10 sản phẩm/ngày. Dừng lấy thêm khi đủ mục tiêu hoặc chạm giới hạn. Khi có dữ liệu, tính đầu vào từ tỷ lệ đạt thực tế và thêm một khoản đệm.
+- **Giờ ngừng gửi yêu cầu mới** bằng 11:30 Bangkok trừ thời gian xử lý một sản phẩm đo từ các lượt vận hành thật. Lấy mốc theo workflow của từng sản phẩm và ghi riêng thời gian bị kẹt hoặc chờ can thiệp. Sau giờ này vẫn có thể ghép và xuất từ clip đã đủ. Dùng biên nhận từ các lượt thật để đo chi phí mỗi sản phẩm đã xử lý, kể cả ca rớt, rồi chốt trần riêng cho Flow và Vertex. Ghi rõ phần chi phí thiếu biên nhận. Cảnh báo ở 80% và dừng gửi yêu cầu mới cho provider đã chạm 100% trần.
+- **Bù vào ngày kế tiếp.** Verdict loại của người dùng không tự kích hoạt đợt bù cùng ngày. Lấy mục tiêu trừ số video đã duyệt và số video đủ QC còn chờ duyệt để xác định phần thiếu. Chỉ bù phần thiếu một lần vào ngày kế tiếp, khi bộ đệm có dưới 2 video và trong trần chi phí, sản phẩm và số đợt hiện có. Ví dụ, hôm nay duyệt 2 video, hết video chờ duyệt và bộ đệm còn 1 video thì mục tiêu ngày mai là 4. Giữ khoảng 2–3 video làm đệm cho lịch đăng. Chỉ tính MP4 mới vào sản lượng tạo video. Khi thiếu, báo số thiếu, chặng bị rớt và `reason_code`.
 
 ## 2. Trạng thái để PM ra quyết định
 
@@ -128,7 +155,8 @@ Các cause hiện hỗ trợ `script|render|product|other`. Verdict cũ thiếu 
 | MP4 ghép hoặc export lỗi | Chạy lại phần ghép/xuất với clip hiện có, không phát sinh yêu cầu AI chỉ vì lỗi ghép |
 | Hết quota đã xác nhận | Ghi provider và mã lý do, kết thúc phần cần quota trong lượt. Cho công việc local đủ đầu vào tiếp tục |
 | Tạm hết slot hoặc rate limit | Ghi trạng thái chờ/giới hạn theo provider. Phân biệt với hết quota. Tôn trọng slot, không biến mỗi lần poll thành lượt tạo mới |
-| Timeout sau khi gửi, chưa rõ kết quả | Giữ operation ID và URL, đối soát yêu cầu cũ. Giữ phần còn chạy được tiếp tục. Chỉ tạo lần mới sau khi có bằng chứng về trạng thái cũ và policy cho phép |
+| Keyframe Flow chưa rõ kết quả sau Send | Đối soát project cũ tối đa 3 lần trong hạn chờ tổng. Dùng ảnh cũ nếu lấy được ảnh hợp lệ. Hết lượt hoặc hết hạn, cho phép tự tạo lại đúng keyframe bằng operation ID mới sau khi phiên thực thi cũ đã dừng và slot được trả an toàn. Giữ operation ID, URL và kết quả chưa rõ của lần cũ. Không đặt trần số lần tạo lại riêng cho ảnh. Dừng khi hết ngân sách hoặc hết thời gian của sản phẩm hay lượt chạy, ghi lý do và chuyển sang sản phẩm kế tiếp |
+| Clip chưa rõ kết quả sau Send | Giữ operation ID và URL, đối soát yêu cầu cũ. Giữ phần còn chạy được tiếp tục. Chỉ tạo lần mới khi có bằng chứng về trạng thái cũ và policy cho phép |
 
 **QC hiện có và chính sách đích.** Preproduction observe ghi review kèm digest và ngưỡng mặc định 80, không làm cổng PASS cho scene plan. Với policy hiện hành, middle/high có kiểm receipt keyframe ở storyboard; high yêu cầu content review final hiện hành. Cổng final còn yêu cầu technical PASS gắn với SHA. Mục tiêu mới là chuyển việc chấm điểm sáng tạo ra khỏi đường tự động, giữ kiểm kỹ thuật và các lỗi hình ảnh có hướng sửa. Recovery keyframe và clip là hai đường riêng. Một bộ đếm `claim_qc_attempt` giới hạn lượt gửi chưa chứng minh ảnh bị QC loại sẽ tự tạo lại và đi tới MP4.
 
@@ -152,6 +180,7 @@ Các cause hiện hỗ trợ `script|render|product|other`. Verdict cũ thiếu 
 | `8e84878`, tag `pre-pov-rubric-v2` | Checkpoint recovery Flow/Vertex, giữ operation và các tình huống no-resend | Phân biệt recovery đã có với vận hành tự động của batch mới. Một số thay đổi rubric POV còn ở working tree vận hành |
 | 08/11, lượt manual | Táo Tàu Đỏ timeout sau khi gửi keyframe đầu. Operation `keyframe-b06968023d4359bad8662759` ở `unknown` tại thời điểm kiểm tra. Kẹo Dừa gặp `PROVIDER_CAPACITY_WAIT` | Run `manual-20261108-10-sel_20261108_c003bfd55020` xuất 0/5 MP4 mới. Lỗi provider cùng cách dừng theo batch làm phần còn lại phải chờ. Trạng thái operation ở đây là ảnh chụp sự cố |
 | `9863eeb` | Publisher từng dòng, standalone Exchange consumer và sửa một lớp worker pause | Có code và tài liệu ca A/B/C. Còn các lỗi nối dưới đây, nên chưa nghiệm thu flow mới |
+| 11/11/2026 | Bỏ ràng buộc giá affiliate, hỗ trợ OCOP `source_product`, nâng cấp prompt lọc watermark/banner, ra mắt Studio Dashboard (`automation/dashboard.py`), xuất 5 video thật đạt chuẩn qua Google Flow | Đạt chuẩn 5 video. Sản phẩm SEAVY Mực Rim Me bị lỗi hình ảnh cảnh giữa cần cứu (`recover-keyframe`). Chi tiết xem `docs/WORKLOG-2026-11-11.md` |
 
 ### Các lỗi chặn release trong `9863eeb`
 
@@ -168,9 +197,9 @@ Các cause hiện hỗ trợ `script|render|product|other`. Verdict cũ thiếu 
 | --- | --- | --- |
 | 1 | Khôi phục giao kèo PI → scheduler cho luồng tuần tự. Dùng lại gói aggregate hiện có hoặc adapter nhỏ nhận gói từng dòng nếu test chứng minh cần | Scheduler nhận đúng gói `READY`, đưa đúng sản phẩm vào VF. Dòng lỗi ảnh được ghi riêng và không làm mất sản phẩm đã đạt. Restart giữ cùng ID và manifest bytes |
 | 2 | Chạy từng workflow qua entrypoint VF hiện có. Ghim chính xác gói, product key, profile, mode và ID ổn định | Hoàn tất hoặc ghi lý do cho A, rồi tiếp tục B. Lặp lại lượt không gửi lại paid operation hoặc xuất lại kết quả đã xác nhận |
-| 3 | Phân loại quota, capacity và unknown. Cho local compose/export tiến tiếp và giữ reservation khi kết quả chưa rõ | B ghi lý do quota, C có MP4 decode được từ clip sẵn, không phát sinh provider submit cho C. Operation chưa rõ kết quả vẫn được đối soát theo ID cũ sau khi vượt thời gian chờ |
+| 3 | Phân loại quota, capacity và unknown. Cho local compose/export tiến tiếp và kết thúc đối soát đúng hạn | B ghi lý do quota, C có MP4 decode được từ clip sẵn, không phát sinh provider submit cho C. Keyframe Flow hết hạn đối soát có thể tạo lần mới sau khi trả slot an toàn. Khi chạy lại, giữ lịch sử operation và không tạo trùng lần thay thế đã ghi |
 | 4 | Nối sửa đúng keyframe/clip theo policy có ngân sách và giới hạn. Dùng bằng chứng/digest để quyết định phần nào phải tạo lại | A hỏng lần đầu, sửa đúng artifact, MP4 decode được. Clip khác giữ nguyên. Timeout sau Send giữ ID cũ khi restart |
-| 5 | Xác nhận báo cáo, smoke test thật có kiểm soát và nghiệm thu scheduler | Một report ghi đủ A/B/C đúng ngày, reason và link output. Chạy thử vài ngày với giới hạn nhỏ trước khi tăng, có đường quay lại khi gặp lỗi |
+| 5 | Đối chiếu báo cáo từ lượt vận hành thật và nghiệm thu scheduler | Một report ghi đủ A/B/C đúng ngày, reason và link output. Dùng số liệu các ngày vận hành trong giới hạn đã chốt, có đường quay lại khi gặp lỗi |
 
 **Cách triển khai theo AGENTS.** Tái sử dụng Spaiauto, publisher có digest, VF admission, job/outbox, recovery và export hiện có. Rebind đường dẫn runtime và cấu hình khi cutover. Sửa nhỏ chỗ PI → scheduler → VF và cổng nhận job theo loại tác vụ. Ưu tiên nối handoff và cô lập lỗi trước. Phát gói ngay khi từng dòng sẵn sàng và chạy song song thuộc phần tối ưu sau khi có số đo. Giữ nguyên schema và các đường phục hồi cũ.
 

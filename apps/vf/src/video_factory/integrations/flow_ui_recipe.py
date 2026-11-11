@@ -7,6 +7,10 @@ from pathlib import Path
 from typing import Any
 
 
+class FlowUploadConsentRequired(RuntimeError):
+    code = "FLOW_UPLOAD_CONSENT_REQUIRED"
+
+
 def unique(locator: Any, code: str, timeout_ms: int) -> Any:
     try:
         locator.first.wait_for(state='visible', timeout=timeout_ms)
@@ -83,6 +87,7 @@ def attach_reference_asset(page: Any, source: Path, output_dir: Path, timeout_ms
     legacy = cards.filter(has_not=titles).filter(has_text=re.compile(
         r'^' + exact_name + r'(?:\s*(?:H\u00ecnh \u1ea3nh|Image))?$'))
     assets = titled.or_(legacy)
+    consent = page.get_by_text(re.compile(r"Quyền sử dụng hình ảnh|Image usage rights", re.I)).filter(visible=True)
     if assets.count() == 0:
         upload = unique(page.locator('button.sidebar-upload-btn:visible'),
                         'GOOGLE_FLOW_REFERENCE_UPLOAD_NOT_UNIQUE', timeout_ms)
@@ -90,12 +95,55 @@ def attach_reference_asset(page: Any, source: Path, output_dir: Path, timeout_ms
             upload.click(timeout=timeout_ms)
         chooser.value.set_files(str(upload_source))
     code = 'GOOGLE_FLOW_REFERENCE_ASSET_NOT_UNIQUE'
+    asset = assets.filter(has_not_text=re.compile(r'Uploading|\u0110ang t\u1ea3i l\u00ean', re.I))
     try:
-        assets.first.wait_for(state='visible', timeout=timeout_ms)
-        asset = assets.filter(has_not_text=re.compile(r'Uploading|\u0110ang t\u1ea3i l\u00ean', re.I))
-        asset.first.wait_for(state='visible', timeout=timeout_ms)
+        asset.or_(consent).first.wait_for(state='visible', timeout=timeout_ms)
     except PlaywrightTimeoutError as exc:
         raise RuntimeError(f'{code}: matches={assets.count()}; no ready asset') from exc
+    if consent.count():
+        import os
+        allow_auto_consent = os.environ.get("VF_AUTO_CONSENT_IMAGE_RIGHTS") == "1" or os.environ.get("FLOW_AUTO_ACCEPT_CONSENT") == "1"
+        if not allow_auto_consent:
+            raise FlowUploadConsentRequired(
+                f"{FlowUploadConsentRequired.code}: Confirm image usage rights in the configured Flow profile before retrying"
+            )
+        dialog = page.locator('[role="dialog"], mat-dialog-container, .cdk-overlay-pane').filter(
+            has=page.get_by_text(re.compile(r"Quyền sử dụng hình ảnh|Image usage rights", re.I))
+        ).filter(visible=True)
+        if dialog.count() != 1:
+            raise FlowUploadConsentRequired(
+                f"{FlowUploadConsentRequired.code}: Image rights consent dialog could not be uniquely identified"
+            )
+        checkbox = dialog.locator('input[type="checkbox"], [role="checkbox"], mat-checkbox, .mdc-checkbox').filter(visible=True)
+        if checkbox.count() != 1:
+            raise FlowUploadConsentRequired(
+                f"{FlowUploadConsentRequired.code}: Checkbox inside image rights dialog could not be uniquely identified"
+            )
+        is_checked = False
+        try:
+            is_checked = checkbox.is_checked()
+        except Exception:
+            try:
+                aria_checked = checkbox.get_attribute("aria-checked")
+                is_checked = aria_checked == "true"
+            except Exception:
+                pass
+        if not is_checked:
+            checkbox.click(timeout=timeout_ms)
+
+        confirm_btn = dialog.locator('button, [role="button"]').filter(visible=True).filter(
+            has_text=re.compile(r"Đồng ý|Xác nhận|Tiếp tục|Accept|Confirm|Agree|Continue|OK", re.I)
+        )
+        if confirm_btn.count() != 1:
+            raise FlowUploadConsentRequired(
+                f"{FlowUploadConsentRequired.code}: Confirm button inside image rights dialog could not be uniquely identified"
+            )
+        confirm_btn.click(timeout=timeout_ms)
+        page.wait_for_timeout(1000)
+        try:
+            asset.first.wait_for(state="visible", timeout=timeout_ms)
+        except Exception:
+            pass
     matches = assets.count()
     if matches != 1:
         raise RuntimeError(f'{code}: matches={matches}')

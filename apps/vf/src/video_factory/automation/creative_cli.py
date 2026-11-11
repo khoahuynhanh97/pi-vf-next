@@ -180,7 +180,7 @@ def _advance_until(coordinator, workflow_id, *, advance, success_action, max_tic
                 skip_unresolved_workflow(connection, workflow_id, reason, known_product_failure=True)
                 return {'workflow_id':workflow_id, 'state':'skipped', 'action':'skipped',
                     'reason':reason, 'evidence':aggregate.get('operator_reason') or aggregate.get('failure_reason')}, True
-        if result.get('action') in {'retry_scheduled', 'running', 'pending'}:
+        if result.get('action') in {'retry_scheduled', 'running', 'pending', 'requeued'}:
             timed_out = _check_no_progress_deadline(coordinator, workflow_id)
             if timed_out:
                 if emit_progress:

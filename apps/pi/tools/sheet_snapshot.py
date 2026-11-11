@@ -11,7 +11,7 @@ from zipfile import BadZipFile
 
 from openpyxl import load_workbook
 
-from tools.selection_handoff import SHEETS
+from tools.selection_handoff import PREVIOUS_SHEET_1, SHEETS
 from tools.spaiauto.storage import bangkok_date, digest
 
 MAX_BYTES = 20 * 1024 * 1024
@@ -47,6 +47,9 @@ def download_snapshots(target_dir: Path, *, fetch=fetch_public_xlsx) -> dict[str
     """Publish both snapshots together; a rerun reuses the immutable pair."""
     paths = {sheet_id: target_dir / f"{sheet_id}.xlsx" for sheet_id in SHEETS}
     if target_dir.exists():
+        previous = target_dir / f"{PREVIOUS_SHEET_1}.xlsx"
+        if not paths[SHEETS[0]].exists() and previous.is_file():
+            paths = {PREVIOUS_SHEET_1: previous, SHEETS[1]: paths[SHEETS[1]]}
         for path in paths.values():
             _validate(path)
         return paths

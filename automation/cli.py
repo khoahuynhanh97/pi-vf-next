@@ -377,12 +377,22 @@ def cmd_trigger(args: argparse.Namespace) -> int:
     if isinstance(res, dict) and res.get("status") == "skipped":
         print(f"[SKIPPED] {res.get('reason')}")
         return 0
+    if isinstance(res, dict) and res.get("status") == "failed":
+        print(f"[FAILED] {res.get('error')}")
+        return 1
     report_configured_run(res)
     status = getattr(res, "status", "unknown")
     print(f"Daily Run Result: {status}")
     if getattr(res, "error", None):
         print(res.error)
     return 0 if status in ("success", "skipped") else 1
+
+
+def cmd_dashboard(args: argparse.Namespace) -> int:
+    """Launch local web UI dashboard."""
+    from automation.dashboard import run_dashboard
+    run_dashboard(host=args.host, port=args.port)
+    return 0
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -470,6 +480,11 @@ def main(argv: list[str] | None = None) -> int:
     p_compare.add_argument("--threshold", type=int, default=80, help="Preproduction QC threshold (0–100, default 80)")
     p_compare.add_argument("--rubric-version", choices=("v1", "v2", "unknown"), help="Filter rows by rubric version")
     p_compare.set_defaults(func=cmd_compare_qc)
+
+    p_dashboard = subparsers.add_parser("dashboard", help="Launch local web UI dashboard")
+    p_dashboard.add_argument("--host", default="127.0.0.1", help="Host to bind (default: 127.0.0.1)")
+    p_dashboard.add_argument("--port", type=int, default=8080, help="Port to listen (default: 8080)")
+    p_dashboard.set_defaults(func=cmd_dashboard)
 
     args = parser.parse_args(argv)
     if args.func is cmd_compare_qc and not 0 <= args.threshold <= 100:

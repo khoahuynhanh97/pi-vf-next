@@ -113,6 +113,12 @@ class ProviderCapacityStore:
         reconciled_takeover: bool = False,
         reconciliation_only: bool = False,
     ) -> bool:
+        env_lease = os.environ.get("VF_CAPACITY_LEASE_SECONDS")
+        if env_lease:
+            try:
+                lease_seconds = float(env_lease)
+            except ValueError:
+                pass
         if not provider_kind or not operation_id or not lease_owner:
             raise ValueError("provider, operation and lease owner are required")
         if isinstance(limit, bool) or limit < 1 or lease_seconds <= 0:
@@ -239,9 +245,90 @@ class ProviderCapacityStore:
         """Release terminal capacity slot inside a caller-managed transaction."""
         self.release_terminal(provider_kind, operation_id, in_transaction=True)
 
+    def release_exhausted_reconciliation_slot(
+        self,
+        *,
+        provider_kind: str,
+        operation_id: str,
+        lease_owner: str | None = None,
+        in_transaction: bool = False,
+    ) -> bool:
+        """Release capacity slot for an exhausted/timed-out unknown operation.
+
+        Strictly enforces:
+        1. Exact operation and provider match.
+        2. Status is 'unknown' and error is exhausted or fatal reconciliation timeout/error.
+        3. Execution session is stopped (not process_lease_owner_alive).
+        4. Lease has expired (lease_expires_at <= now).
+        """
+        del lease_owner  # caller identity does not bypass process liveness or lease expiry guards
+        import json
+        import time
+        now = time.time()
+        conn = self.connection
+        should_commit = False
+        if not in_transaction:
+            try:
+                conn.execute("BEGIN IMMEDIATE")
+                should_commit = True
+            except sqlite3.OperationalError:
+                should_commit = False
+        try:
+            slot = conn.execute(
+                "SELECT operation_id, provider_kind, provider_operation_id, lease_owner, lease_expires_at "
+                "FROM video_factory_provider_capacity WHERE provider_kind=? AND operation_id=?",
+                (provider_kind, operation_id),
+            ).fetchone()
+            if slot is None:
+                if should_commit:
+                    conn.commit()
+                # Slot reservation does not exist (already released or cleared); safe to proceed
+                return True
+
+            table_columns = {row[1] for row in conn.execute("PRAGMA table_info(video_factory_keyframe_operation)")}
+            has_meta = "provider_metadata_json" in table_columns
+            cols = "status, error_code, provider_operation_id" + (", provider_metadata_json" if has_meta else "")
+
+            op = conn.execute(
+                f"SELECT {cols} FROM video_factory_keyframe_operation WHERE operation_id=? AND provider_kind=?",
+                (operation_id, provider_kind),
+            ).fetchone()
+            if op is None or (op["status"] not in ("unknown", "abandoned_unknown") and not (op["status"] == "failed" and str(op["error_code"] or "") in ("KEYFRAME_TIMEOUT_EXPIRED", "GOOGLE_FLOW_KEYFRAME_TIMEOUT"))): 
+                if should_commit:
+                    conn.commit()
+                return False
+
+            if slot["provider_operation_id"] and op["provider_operation_id"] and slot["provider_operation_id"] != op["provider_operation_id"]:
+                if should_commit:
+                    conn.commit()
+                return False
+
+            owner_alive = process_lease_owner_alive(slot["lease_owner"])
+            lease_active = slot["lease_expires_at"] > now
+
+            # Shared condition: phiên đã dừng (not owner_alive) VÀ lease đã hết hiệu lực (not lease_active)
+            if owner_alive or lease_active:
+                if should_commit:
+                    conn.commit()
+                return False
+
+            conn.execute(
+                "DELETE FROM video_factory_provider_capacity WHERE provider_kind=? AND operation_id=?",
+                (provider_kind, operation_id),
+            )
+            if should_commit:
+                conn.commit()
+            return True
+        except Exception:
+            if should_commit:
+                conn.rollback()
+            raise
+
     @staticmethod
     def cleanup_orphaned_slots(connection: sqlite3.Connection) -> int:
         """Release proven terminal reservations inside the caller's transaction."""
+        import time
+        now = time.time()
         count = 0
         for table in ("video_factory_keyframe_operation", "video_factory_scene_operation"):
             columns = {row[1] for row in connection.execute(f"PRAGMA table_info({table})")}
@@ -253,11 +340,12 @@ class ProviderCapacityStore:
                         SELECT 1 FROM {table} AS op
                         WHERE op.operation_id=slot.operation_id AND op.provider_kind=slot.provider_kind
                           AND (slot.provider_operation_id='' OR op.provider_operation_id=slot.provider_operation_id)
-                          AND (op.status IN ('completed', 'cancelled', 'canceled')
+                          AND (op.status IN ('completed', 'cancelled', 'canceled', 'abandoned_unknown')
                                OR (op.status='failed' AND op.error_code='OPERATOR_RECONCILED_FAILED'))
                     )"""
             )
             count += cursor.rowcount
+
         return count
 
     def active(self, provider_kind: str) -> list[dict[str, Any]]:

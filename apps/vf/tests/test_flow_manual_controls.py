@@ -137,6 +137,30 @@ _VIDEO_PENDING = '<flow-pending-tile style="display:block;width:100px;height:40p
 _FLOW_PROJECT_URL = 'https://flow.google.com/project/00000000-0000-0000-0000-000000000001'
 
 
+def test_video_submit_reports_consent_required_before_send(adapter, tmp_path):
+    from video_factory.integrations.flow_ui_recipe import FlowUploadConsentRequired
+
+    source = tmp_path / 'reference.png'
+    source.write_bytes(b'reference')
+    req = replace(request(), reference_image_paths=(str(source),))
+    page = MagicMock(url=_FLOW_PROJECT_URL)
+    page.locator.return_value.count.return_value = 0
+    page.locator.return_value.inner_text.return_value = adapter._marker(req.request_id)
+    with patch('time.sleep'), patch.object(adapter, '_browser'), \
+         patch.object(adapter, '_home', return_value=page), \
+         patch.object(adapter, '_project_card', return_value=None), \
+         patch.object(adapter, '_close_agent_panel'), \
+         patch.object(adapter, '_configure_project', return_value=12), \
+         patch.object(adapter, '_attach_start_frame', side_effect=FlowUploadConsentRequired('Confirm rights')), \
+         patch.object(adapter, '_generate') as generate:
+        result = adapter.submit(req)
+
+    assert (result.status, result.error_code) == ('failed', 'FLOW_UPLOAD_CONSENT_REQUIRED')
+    assert result.provider_operation_id == _FLOW_PROJECT_URL
+    assert result.metadata['send_attempted'] is False
+    generate.assert_not_called()
+
+
 def _generate_page(page, *, prompt='test', on_send=None, persisted_video=True):
     page.set_default_timeout(5000)
     if on_send is None:
@@ -358,6 +382,26 @@ def test_reference_picker_waits_for_exact_title_to_finish_uploading(page, tmp_pa
     attach_reference_asset(page, source, tmp_path / 'uploads', 1000)
     assert page.evaluate('window.pickedWhileUploading === false')
     assert page.evaluate('window.wrongAsset === undefined && window.uploadedAgain === undefined')
+
+
+def test_reference_picker_reports_consent_required_without_accepting(page, tmp_path):
+    from video_factory.integrations.flow_ui_recipe import FlowUploadConsentRequired, attach_reference_asset
+
+    source = tmp_path / 'product.png'
+    source.write_bytes(b'product reference')
+    page.set_content('''
+        <input type="file" hidden onchange="document.querySelector('[role=dialog]').hidden=false">
+        <button class="sidebar-upload-btn" onclick="document.querySelector('input').click()">Upload</button>
+        <div role="dialog" hidden>
+            <h2>Quyền sử dụng hình ảnh này</h2>
+            <button onclick="window.accepted=true">Tôi đồng ý</button>
+        </div>
+    ''')
+
+    with pytest.raises(FlowUploadConsentRequired):
+        attach_reference_asset(page, source, tmp_path / 'uploads', 1000)
+    assert page.get_by_role('dialog').is_visible()
+    assert page.evaluate('window.accepted === undefined')
 
 
 def test_reference_picker_rejects_duplicate_exact_titles(page, tmp_path):

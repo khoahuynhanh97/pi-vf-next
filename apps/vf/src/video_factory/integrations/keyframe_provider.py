@@ -312,33 +312,70 @@ class KeyframeOperationStore:
 
     def claim_output_reconciliation(
         self, operation_id: str, provider_operation_id: str, *, max_attempts: int = MAX_OUTPUT_RECONCILIATION_ATTEMPTS,
+        lease_owner: str | None = None,
     ) -> int | None:
         """Persist a bounded read/download attempt without changing generation state."""
         self.connection.execute("BEGIN IMMEDIATE")
         try:
             row = self.connection.execute(
-                "SELECT status, provider_operation_id, provider_metadata_json "
+                "SELECT status, error_code, provider_operation_id, provider_metadata_json "
                 "FROM video_factory_keyframe_operation WHERE operation_id=?",
                 (operation_id,),
             ).fetchone()
-            if (row is None or row["status"] not in {"unknown", "submitting", "project_created"}
+            is_timed_out_reconcilable = (row is not None and row["status"] == "failed" and str(row["error_code"] or "").upper() in {"KEYFRAME_TIMEOUT_EXPIRED", "GOOGLE_FLOW_KEYFRAME_TIMEOUT"})
+            if (row is None or (row["status"] not in {"unknown", "submitting", "project_created"} and not is_timed_out_reconcilable)
                     or str(row["provider_operation_id"] or "") != provider_operation_id):
                 self.connection.commit()
                 return None
+
+            import time
+            from video_factory.integrations.capacity import process_lease_owner_alive
+            slot = self.connection.execute(
+                "SELECT lease_owner, lease_expires_at FROM video_factory_provider_capacity WHERE operation_id=?",
+                (operation_id,),
+            ).fetchone()
+            if slot:
+                slot_owner = slot["lease_owner"]
+                expires_at = float(slot["lease_expires_at"] or 0)
+                now_ts = time.time()
+                owner_alive = bool(slot_owner and process_lease_owner_alive(slot_owner))
+                lease_active = expires_at > now_ts and owner_alive
+                if lease_active:
+                    if lease_owner is not None and slot_owner == lease_owner:
+                        pass  # Current lease owner authorized to reconcile
+                    else:
+                        self.connection.commit()
+                        raise RuntimeError("PROVIDER_CAPACITY_WAIT: Slot lease held by active worker")
+
             try:
                 metadata = json.loads(row["provider_metadata_json"] or "{}")
             except (TypeError, ValueError, json.JSONDecodeError):
                 metadata = {}
-            attempt = int(metadata.get("output_reconciliation_attempts") or 0)
-            if attempt >= max_attempts:
+
+            attempts = int(metadata.get("output_reconciliation_attempts") or 0)
+            finished_attempts = int(metadata.get("output_reconciliation_finished_attempt") or 0)
+            if finished_attempts >= max_attempts:
                 self.connection.commit()
                 return None
-            attempt += 1
+
+            # An interrupted/dở dang attempt (worker died mid-poll) does not count as completed.
+            # Continue the interrupted attempt on the exact project within deadline:
+            if attempts >= max_attempts:
+                if slot and lease_owner is not None and slot["lease_owner"] == lease_owner:
+                    attempt = max_attempts
+                elif slot is None and lease_owner is None:
+                    self.connection.commit()
+                    return None
+                else:
+                    attempt = max_attempts
+            else:
+                attempt = attempts + 1
+
             metadata["output_reconciliation_attempts"] = attempt
             metadata["output_reconciliation_last_attempt_at"] = datetime.now(timezone.utc).isoformat()
             self.connection.execute(
-                "UPDATE video_factory_keyframe_operation SET provider_metadata_json=?, updated_at=CURRENT_TIMESTAMP "
-                "WHERE operation_id=? AND status IN ('unknown','submitting','project_created')",
+                "UPDATE video_factory_keyframe_operation SET status='unknown', provider_metadata_json=?, updated_at=CURRENT_TIMESTAMP "
+                "WHERE operation_id=? AND (status IN ('unknown','submitting','project_created') OR (status='failed' AND error_code IN ('KEYFRAME_TIMEOUT_EXPIRED','GOOGLE_FLOW_KEYFRAME_TIMEOUT')))",
                 (json.dumps(metadata, sort_keys=True), operation_id),
             )
             self.connection.commit()
@@ -449,7 +486,7 @@ class KeyframeOperationStore:
         existing = self.get(request.operation_id)
         if existing and existing["request_digest"] != digest:
             raise ValueError("keyframe operation idempotency conflict")
-        if existing and result.status == "unknown" and result.error_code == "OUTPUT_RECONCILIATION_EXHAUSTED":
+        if existing and existing.get("error_code") == "GOOGLE_FLOW_OUTPUT_NOT_RETRIEVED" and result.status == "unknown" and result.error_code == "OUTPUT_RECONCILIATION_EXHAUSTED":
             # No poll ran. Preserve the last settled outcome for operator recovery.
             return
         existing_kind = str((existing or {}).get("provider_kind") or "").strip()
@@ -519,12 +556,13 @@ class KeyframeRuntime:
     def __init__(
         self, *, store: KeyframeOperationStore, provider: KeyframeGenerationPort,
         capacity_store: ProviderCapacityStore | None = None, capacity_limit: int = 1,
+        lease_owner: str | None = None,
     ) -> None:
         self.store = store
         self.provider = provider
         self.capacity_store = capacity_store
         self.capacity_limit = capacity_limit
-        self.lease_owner = uuid.uuid4().hex
+        self.lease_owner = lease_owner or uuid.uuid4().hex
         self.provider_kind = str(getattr(provider, "provider_kind", "vertex_keyframe"))
         if hasattr(provider, "bind_operation_store"):
             provider.bind_operation_store(store)
@@ -565,10 +603,23 @@ class KeyframeRuntime:
                     error_code=existing["error_code"], error_message=existing["error_message"],
                 )
             if existing["status"] == "failed":
-                if str(existing.get("error_code") or "").upper() not in {
+                err_code = str(existing.get("error_code") or "").upper()
+                err_msg = str(existing.get("error_message") or "")
+                meta_json = {}
+                try:
+                    meta_json = json.loads(existing.get("provider_metadata_json") or "{}")
+                except Exception:
+                    pass
+                send_attempted = meta_json.get("send_attempted", True)
+                is_pre_send_consent = (
+                    (err_code == "FLOW_UPLOAD_CONSENT_REQUIRED" or "FLOW_UPLOAD_CONSENT_REQUIRED" in err_msg)
+                    and send_attempted is False
+                )
+                if (err_code not in {
                     "HTTP_429", "HTTP_500", "HTTP_502", "HTTP_503", "HTTP_504",
-                    "PROVIDER_CAPACITY_WAIT", "NETWORK_UNKNOWN_OUTCOME", "RECONCILIATION_REQUIRED"
-                }:
+                    "PROVIDER_CAPACITY_WAIT", "NETWORK_UNKNOWN_OUTCOME", "RECONCILIATION_REQUIRED",
+                    "KEYFRAME_TIMEOUT_EXPIRED", "GOOGLE_FLOW_KEYFRAME_TIMEOUT",
+                } and not is_pre_send_consent):
                     return KeyframeGenerationResult(
                         operation_id=request.operation_id,
                         status="failed",
@@ -577,6 +628,39 @@ class KeyframeRuntime:
                         error_message=existing["error_message"],
                     )
             if provider_operation_id:
+                meta = {}
+                try:
+                    meta = json.loads(existing.get("provider_metadata_json") or "{}")
+                except Exception:
+                    meta = {}
+                attempts = int(meta.get("output_reconciliation_attempts") or 0)
+                err_code = str(existing.get("error_code") or "")
+                non_reconcilable_errors = (
+                    "FLOW_PROJECT_CHECKPOINT_INVALID", "GOOGLE_FLOW_AUTH_REQUIRED",
+                    "GOOGLE_FLOW_AUTH_UNVERIFIED", "GOOGLE_FLOW_PROJECT_URL_MISMATCH",
+                    "GOOGLE_FLOW_PROJECT_ACCESS_FAILED", "GOOGLE_FLOW_PROFILE_UNAVAILABLE",
+                    "GOOGLE_FLOW_PROFILE_BUSY",
+                )
+                if err_code in non_reconcilable_errors:
+                    return KeyframeGenerationResult(
+                        operation_id=request.operation_id,
+                        status="unknown",
+                        provider_operation_id=provider_operation_id,
+                        error_code=err_code,
+                        error_message=existing.get("error_message") or f"Google Flow stopped due to {err_code}",
+                        metadata=meta,
+                    )
+                finished_attempts = int(meta.get("output_reconciliation_finished_attempt") or 0)
+                polls_exhausted = finished_attempts >= MAX_OUTPUT_RECONCILIATION_ATTEMPTS
+                if polls_exhausted:
+                    return KeyframeGenerationResult(
+                        operation_id=request.operation_id,
+                        status="unknown",
+                        provider_operation_id=provider_operation_id,
+                        error_code="OUTPUT_RECONCILIATION_EXHAUSTED",
+                        error_message=existing.get("error_message") or "Output retrieval reached its three-attempt limit; generation remains unreconciled",
+                        metadata=meta,
+                    )
                 if self.capacity_store and not self.capacity_store.try_acquire(
                     provider_kind=self.provider_kind,
                     operation_id=request.operation_id,
@@ -589,6 +673,8 @@ class KeyframeRuntime:
                         request.operation_id, "unknown", error_code="PROVIDER_CAPACITY_WAIT",
                         error_message="provider capacity is full; retry the same operation later",
                     )
+                if hasattr(self.provider, "lease_owner"):
+                    self.provider.lease_owner = self.lease_owner
                 reconcile_output = getattr(self.provider, "reconcile_existing_output", None)
                 result = (
                     reconcile_output(request, provider_operation_id)
@@ -617,7 +703,7 @@ class KeyframeRuntime:
         try:
             result = self.provider.submit(request)
         except Exception as exc:
-            return KeyframeGenerationResult(
+            result = KeyframeGenerationResult(
                 request.operation_id, "unknown", error_code="RECONCILIATION_REQUIRED",
                 error_message=str(exc),
             )
@@ -631,3 +717,4 @@ class KeyframeRuntime:
             self.capacity_store.bind_provider_operation(
                 self.provider_kind, request.operation_id, result.provider_operation_id,
             )
+
