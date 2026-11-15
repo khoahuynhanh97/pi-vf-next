@@ -1642,3 +1642,108 @@ def test_p0_recovery_outbox_failure_rolls_back_atomically(tmp_path):
 
     conn.close()
 
+
+def test_p0_clip_abandoned_unknown_releases_slot_and_never_resubmits(tmp_path):
+    """P0 Mục 2: Clip marked abandoned_unknown releases capacity slot and cannot be resubmitted."""
+    from video_factory.integrations.capacity import ProviderCapacityStore
+
+    db_file = tmp_path / "test_clip_abandon.db"
+    conn = connect(db_file)
+    capacity = ProviderCapacityStore(conn)
+
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS video_factory_scene_operation (
+            operation_id TEXT PRIMARY KEY,
+            owner_user_id TEXT NOT NULL,
+            project_id TEXT NOT NULL,
+            scene_id TEXT NOT NULL,
+            status TEXT NOT NULL,
+            provider_operation_id TEXT,
+            error_code TEXT NOT NULL DEFAULT '',
+            error_message TEXT NOT NULL DEFAULT '',
+            provider_kind TEXT NOT NULL DEFAULT 'google_flow'
+        )
+    """)
+    op_id = "scene_op_abandoned_1"
+    prov_op_id = "https://flow.google.com/project/00000000-0000-0000-0000-000000000099"
+    conn.execute(
+        "INSERT INTO video_factory_scene_operation (operation_id, owner_user_id, project_id, scene_id, status, provider_operation_id, error_code, error_message, provider_kind) "
+        "VALUES (?, 'user1', 'proj1', 's1', 'abandoned_unknown', ?, 'CLIP_OUTPUT_NOT_RETRIEVED', 'Flow clip output not retrieved', 'google_flow')",
+        (op_id, prov_op_id),
+    )
+    conn.execute(
+        "INSERT INTO video_factory_provider_capacity (provider_kind, operation_id, lease_owner, lease_expires_at, provider_operation_id) "
+        "VALUES ('google_flow', ?, '99999999:dead', 0, ?)",
+        (op_id, prov_op_id),
+    )
+    conn.commit()
+
+    assert len(capacity.active("google_flow")) == 1
+
+    released = capacity.release_exhausted_reconciliation_slot(provider_kind="google_flow", operation_id=op_id)
+    assert released is True
+    assert capacity.active("google_flow") == []
+
+    row = conn.execute("SELECT status, error_code FROM video_factory_scene_operation WHERE operation_id=?", (op_id,)).fetchone()
+    assert row["status"] == "abandoned_unknown"
+    assert row["error_code"] == "CLIP_OUTPUT_NOT_RETRIEVED"
+    conn.close()
+
+
+def test_p0_clip_probe_infra_error_is_fail_closed(tmp_path, monkeypatch):
+    """P0 Mục 2: If scene status probe raises an infra error, slot and status are preserved (fail-closed)."""
+    import subprocess
+    from automation.pipelines.spark_pipeline import _wait_for_flow_keyframe_slot
+    from video_factory.integrations.capacity import ProviderCapacityStore
+
+    db_file = tmp_path / "test_clip_probe_fail_closed.db"
+    conn = connect(db_file)
+    capacity = ProviderCapacityStore(conn)
+
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS video_factory_scene_operation (
+            operation_id TEXT PRIMARY KEY,
+            owner_user_id TEXT NOT NULL,
+            project_id TEXT NOT NULL,
+            scene_id TEXT NOT NULL,
+            status TEXT NOT NULL,
+            provider_operation_id TEXT,
+            error_code TEXT NOT NULL DEFAULT '',
+            error_message TEXT NOT NULL DEFAULT '',
+            provider_kind TEXT NOT NULL DEFAULT 'google_flow',
+            submitted_at TEXT,
+            updated_at TEXT
+        )
+    """)
+    op_id = "scene_op_infra_err_1"
+    prov_op_id = "https://flow.google.com/project/00000000-0000-0000-0000-000000000098"
+    conn.execute(
+        "INSERT INTO video_factory_scene_operation (operation_id, owner_user_id, project_id, scene_id, status, provider_operation_id, error_code, error_message, provider_kind, submitted_at, updated_at) "
+        "VALUES (?, 'user1', 'proj1', 's1', 'unknown', ?, '', '', 'google_flow', '2026-11-01T00:00:00Z', '2026-11-01T00:00:00Z')",
+        (op_id, prov_op_id),
+    )
+    conn.execute(
+        "INSERT INTO video_factory_provider_capacity (provider_kind, operation_id, lease_owner, lease_expires_at, provider_operation_id) "
+        "VALUES ('google_flow', ?, '99999999:dead', 0, ?)",
+        (op_id, prov_op_id),
+    )
+    conn.commit()
+
+    class FakeProc:
+        returncode = 0
+        stdout = json.dumps({"outcome": "infra_error", "error_code": "GOOGLE_FLOW_PROFILE_BUSY", "error": "Profile locked"})
+        stderr = ""
+
+    monkeypatch.setattr(subprocess, "run", lambda *args, **kwargs: FakeProc())
+
+    result = _wait_for_flow_keyframe_slot(db_file, timeout_seconds=1.0)
+    assert result is False
+
+    assert len(capacity.active("google_flow")) == 1
+    assert capacity.active("google_flow")[0]["operation_id"] == op_id
+
+    row = conn.execute("SELECT status, error_code FROM video_factory_scene_operation WHERE operation_id=?", (op_id,)).fetchone()
+    assert row["status"] == "unknown"
+    assert row["error_code"] != "CLIP_OUTPUT_NOT_RETRIEVED"
+    conn.close()
+

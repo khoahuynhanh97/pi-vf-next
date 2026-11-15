@@ -9,6 +9,9 @@ import uuid
 from typing import Any
 
 
+MAX_OUTPUT_RECONCILIATION_ATTEMPTS = 3
+
+
 _PROCESS_LEASE_TOKEN = uuid.uuid4().hex
 
 
@@ -286,17 +289,61 @@ class ProviderCapacityStore:
                 return True
 
             table_columns = {row[1] for row in conn.execute("PRAGMA table_info(video_factory_keyframe_operation)")}
-            has_meta = "provider_metadata_json" in table_columns
-            cols = "status, error_code, provider_operation_id" + (", provider_metadata_json" if has_meta else "")
+            op = None
+            has_meta = False
+            if "operation_id" in table_columns:
+                has_meta = "provider_metadata_json" in table_columns
+                cols = "status, error_code, provider_operation_id" + (", provider_metadata_json" if has_meta else "")
+                op = conn.execute(
+                    f"SELECT {cols} FROM video_factory_keyframe_operation WHERE operation_id=? AND provider_kind=?",
+                    (operation_id, provider_kind),
+                ).fetchone()
+            is_scene = False
+            if op is None:
+                scene_cols = {row[1] for row in conn.execute("PRAGMA table_info(video_factory_scene_operation)")}
+                if {"operation_id", "status", "error_code", "provider_operation_id"} <= scene_cols:
+                    op = conn.execute(
+                        "SELECT operation_id, status, error_code, provider_operation_id "
+                        "FROM video_factory_scene_operation WHERE operation_id=? AND provider_kind=?",
+                        (operation_id, provider_kind),
+                    ).fetchone()
+                    if op is not None:
+                        is_scene = True
 
-            op = conn.execute(
-                f"SELECT {cols} FROM video_factory_keyframe_operation WHERE operation_id=? AND provider_kind=?",
-                (operation_id, provider_kind),
-            ).fetchone()
-            if op is None or (op["status"] not in ("unknown", "abandoned_unknown") and not (op["status"] == "failed" and str(op["error_code"] or "") in ("KEYFRAME_TIMEOUT_EXPIRED", "GOOGLE_FLOW_KEYFRAME_TIMEOUT"))): 
+            if op is None:
                 if should_commit:
                     conn.commit()
                 return False
+
+            if not is_scene:
+                meta = {}
+                if has_meta and op["provider_metadata_json"]:
+                    try:
+                        meta = json.loads(op["provider_metadata_json"])
+                    except Exception:
+                        pass
+                finished_attempts = int(meta.get("output_reconciliation_finished_attempt") or 0)
+                err_code = str(op["error_code"] or "")
+                polls_exhausted = (
+                    finished_attempts >= MAX_OUTPUT_RECONCILIATION_ATTEMPTS
+                    or err_code == "OUTPUT_RECONCILIATION_EXHAUSTED"
+                    or op["status"] == "abandoned_unknown"
+                )
+                if not polls_exhausted:
+                    if should_commit:
+                        conn.commit()
+                    return False
+                if op["status"] not in ("unknown", "abandoned_unknown") and not (
+                    op["status"] == "failed" and err_code in ("KEYFRAME_TIMEOUT_EXPIRED", "GOOGLE_FLOW_KEYFRAME_TIMEOUT")
+                ):
+                    if should_commit:
+                        conn.commit()
+                    return False
+            else:
+                if op["status"] not in ("abandoned_unknown", "completed", "cancelled", "canceled"):
+                    if should_commit:
+                        conn.commit()
+                    return False
 
             if slot["provider_operation_id"] and op["provider_operation_id"] and slot["provider_operation_id"] != op["provider_operation_id"]:
                 if should_commit:

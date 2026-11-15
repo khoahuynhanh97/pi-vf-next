@@ -43,6 +43,12 @@ from automation.storage import atomic_json, exclusive_file_lock
 
 logger = logging.getLogger(__name__)
 
+# Named constant for flow clip orphan threshold (default 900s = 15 minutes).
+# Must be greater than lease duration (300s) + scene render timeout (~300s).
+FLOW_CLIP_ORPHAN_TIMEOUT_SECONDS = float(os.getenv("VF_FLOW_CLIP_ORPHAN_TIMEOUT_SECONDS", "900.0"))
+FLOW_PROBE_TIMEOUT_SECONDS = float(os.getenv("VF_FLOW_PROBE_TIMEOUT_SECONDS", "60.0"))
+_FLOW_ORPHAN_WAITED_OPS: set[str] = set()
+
 
 @dataclass
 class VideoProbeResult:
@@ -872,7 +878,7 @@ def _run_sheet_batches(result, batches, db_path, tuned_profile, run_dir, profile
                 })
                 continue
             if not _can_product_bypass_flow_wait(db_path, product_key):
-                _wait_for_flow_keyframe_slot(db_path, provider_mode=result.provider_mode)
+                _wait_for_flow_keyframe_slot(db_path, provider_mode=result.provider_mode, run_result=result)
             child = PipelineRunResult(
                 _sheet_child_run_id(result.run_id, child_dir.name), "running", result.production_date,
                 result.spark_csv, result.spark_csv_sha256, result.scenes, 1, result.provider_mode,
@@ -1041,8 +1047,133 @@ def _can_product_bypass_flow_wait(db_path: Path, product_key: str) -> bool:
         pass
     return False
 
-def _wait_for_flow_keyframe_slot(db_path: Path, provider_mode: str = "configured", timeout_seconds: float = 300.0) -> bool:
-    """When the previous Flow worker stopped and its lease expired, resume A's workflow via VF CLI entrypoint under a shared deadline."""
+def _resolve_scene_product_and_workflow(
+    conn: sqlite3.Connection,
+    scene_row: sqlite3.Row,
+) -> tuple[str, str]:
+    """Resolve product_key and workflow_id bound to a scene operation."""
+    render_batch_id = scene_row["render_batch_id"] if "render_batch_id" in scene_row.keys() else ""
+    project_id = scene_row["project_id"] if "project_id" in scene_row.keys() else ""
+    target_pk = ""
+    target_wf = ""
+    if render_batch_id:
+        rb_row = conn.execute(
+            "SELECT workflow_id, project_id FROM video_factory_render_batches WHERE render_batch_id=?",
+            (render_batch_id,),
+        ).fetchone()
+        if rb_row:
+            target_wf = rb_row["workflow_id"] or ""
+
+    if not target_wf and project_id:
+        wf_row = conn.execute(
+            "SELECT workflow_id FROM workflow WHERE project_id=? LIMIT 1",
+            (project_id,),
+        ).fetchone()
+        if wf_row:
+            target_wf = wf_row["workflow_id"] or ""
+
+    if target_wf:
+        wf_agg_row = conn.execute("SELECT aggregate_json FROM workflow WHERE workflow_id=?", (target_wf,)).fetchone()
+        if wf_agg_row and wf_agg_row[0]:
+            try:
+                agg = json.loads(wf_agg_row[0])
+                source = agg.get("source_context") or {}
+                target_pk = source.get("product_key") or agg.get("product_key") or ""
+            except Exception:
+                pass
+    return target_pk, target_wf
+
+
+def _record_scene_abandoned_outcome(
+    conn: sqlite3.Connection,
+    db_path: Path,
+    op_id: str,
+    scene_row: sqlite3.Row,
+    err_msg: str,
+    run_result: PipelineRunResult,
+) -> None:
+    """Safely record failed outcome for product A when its scene is abandoned, without duplicate or overwrite."""
+    try:
+        target_pk, target_wf = _resolve_scene_product_and_workflow(conn, scene_row)
+        outcome_item = {
+            "workflow_id": target_wf,
+            "product_key": target_pk,
+            "status": "failed",
+            "stage": "creative_batch",
+            "reason": f"[CLIP_OUTPUT_NOT_RETRIEVED] {err_msg}",
+            "operation_id": op_id,
+        }
+
+        existing_idx = next(
+            (idx for idx, ex in enumerate(run_result.product_outcomes)
+             if (target_wf and ex.get("workflow_id") == target_wf) or (target_pk and ex.get("product_key") == target_pk)),
+            None,
+        )
+        if existing_idx is not None:
+            existing = run_result.product_outcomes[existing_idx]
+            if existing.get("status") not in ("success", "completed", "reused") or not existing.get("receipt_path"):
+                run_result.product_outcomes[existing_idx] = {**existing, **outcome_item}
+        elif target_pk or target_wf:
+            run_result.product_outcomes.append(outcome_item)
+    except Exception as exc:
+        logger.warning("Could not bind product outcome for abandoned scene %s: %s", op_id, exc)
+
+
+def _record_scene_recovered_outcome(
+    conn: sqlite3.Connection,
+    db_path: Path,
+    op_id: str,
+    scene_row: sqlite3.Row,
+    run_result: PipelineRunResult,
+) -> None:
+    """Record in daily report that clip was recovered from Google Flow and workflow A is pending export completion (Option b)."""
+    try:
+        target_pk, target_wf = _resolve_scene_product_and_workflow(conn, scene_row)
+        if not target_pk and not target_wf:
+            return
+
+        existing_idx = next(
+            (idx for idx, ex in enumerate(run_result.product_outcomes)
+             if (target_wf and ex.get("workflow_id") == target_wf) or (target_pk and ex.get("product_key") == target_pk)),
+            None,
+        )
+
+        # If already completed with receipt, do not overwrite
+        if existing_idx is not None:
+            existing = run_result.product_outcomes[existing_idx]
+            if existing.get("status") in ("success", "completed", "reused") and existing.get("receipt_path"):
+                return
+
+        resume_cmd = (
+            f"python -m video_factory.cli creative-batch --product-key {target_pk}"
+            if target_pk else
+            f"python -m video_factory.cli creative-batch"
+        )
+        outcome_item = {
+            "workflow_id": target_wf,
+            "product_key": target_pk,
+            "status": "waiting",
+            "stage": "creative_batch",
+            "reason": f"Clip đã thu hồi thành công từ Google Flow (op={op_id}), workflow chưa hoàn tất xuất MP4.",
+            "next_step": f"Chạy '{resume_cmd}' để hoàn tất xuất video.",
+            "operation_id": op_id,
+        }
+
+        if existing_idx is not None:
+            run_result.product_outcomes[existing_idx] = {**run_result.product_outcomes[existing_idx], **outcome_item}
+        else:
+            run_result.product_outcomes.append(outcome_item)
+    except Exception as exc:
+        logger.warning("Could not record recovered clip outcome for scene %s: %s", op_id, exc)
+
+
+def _wait_for_flow_keyframe_slot(
+    db_path: Path,
+    provider_mode: str = "configured",
+    timeout_seconds: float = 300.0,
+    run_result: PipelineRunResult | None = None,
+) -> bool:
+    """When previous Flow worker stopped and its lease expired, reclaim exhausted slots or resume under a shared deadline."""
     try:
         from video_factory.integrations.capacity import process_lease_owner_alive
     except ImportError:
@@ -1062,113 +1193,318 @@ def _wait_for_flow_keyframe_slot(db_path: Path, provider_mode: str = "configured
         with closing(sqlite3.connect(str(db_path))) as conn:
             conn.row_factory = sqlite3.Row
             slots = conn.execute(
-                """SELECT slot.operation_id, slot.lease_owner, slot.lease_expires_at,
-                          op.workflow_id, op.status, op.error_code, op.provider_operation_id,
-                          op.provider_metadata_json
-                   FROM video_factory_provider_capacity AS slot
-                   JOIN video_factory_keyframe_operation AS op
-                     ON op.operation_id=slot.operation_id AND op.provider_kind=slot.provider_kind
-                  WHERE slot.provider_kind='google_flow'"""
+                """SELECT operation_id, provider_kind, provider_operation_id, lease_owner, lease_expires_at
+                   FROM video_factory_provider_capacity
+                   WHERE provider_kind='google_flow'"""
             ).fetchall()
         if not slots:
             return False
-        row = slots[0]
-        owner = row["lease_owner"]
-        expires = row["lease_expires_at"]
-        status = row["status"]
-        wf_id = row["workflow_id"]
-        op_id = row["operation_id"]
-        err_code = str(row["error_code"] or "")
-        meta = {}
-        try:
-            meta = json.loads(row["provider_metadata_json"] or "{}")
-        except Exception:
-            pass
-        finished_attempts = int(meta.get("output_reconciliation_finished_attempt") or 0)
 
-        # Guard: Preserve reservation if worker is still alive
-        if status != "unknown" or process_lease_owner_alive(owner):
-            return False
+        for row in slots:
+            owner = row["lease_owner"]
+            expires = row["lease_expires_at"]
+            op_id = row["operation_id"]
+            prov_op_id = row["provider_operation_id"] or ""
 
-        # Wait for lease to expire under the single shared deadline
-        now = time.time()
-        if now < expires:
-            delay = expires - now
-            if delay > (deadline - now):
+            # Guard: Preserve reservation if worker is still alive
+            if process_lease_owner_alive(owner):
+                continue
+
+            # Wait for lease to expire under the single shared deadline
+            now = time.time()
+            if now < expires:
+                delay = expires - now
+                if delay > (deadline - now):
+                    return False
+                logger.info("Waiting %.1fs for previous Flow lease to expire (op=%s)", delay, op_id)
+                time.sleep(delay)
+
+            remaining_time = max(0.0, deadline - time.time())
+            if remaining_time <= 0:
                 return False
-            logger.info("Waiting %.1fs for previous Flow keyframe lease to expire", delay)
-            time.sleep(delay)
 
-        remaining_time = max(0.0, deadline - time.time())
-        if remaining_time <= 0:
-            return False
-
-        # Worker has stopped and lease has expired.
-        # If reconciliation already exhausted in previous worker, release slot for next product
-        # without reopening the failed product in the same run.
-        if finished_attempts >= 3 or err_code == "OUTPUT_RECONCILIATION_EXHAUSTED":
             with closing(sqlite3.connect(str(db_path))) as conn:
                 conn.row_factory = sqlite3.Row
-                from video_factory.integrations.capacity import ProviderCapacityStore
-                from video_factory.workflows.runtime_control import ensure_pipeline_pause
-                ProviderCapacityStore(conn).release_exhausted_reconciliation_slot(
-                    provider_kind="google_flow",
-                    operation_id=op_id,
-                )
-                ensure_pipeline_pause(conn)
-            return True
 
-        # Otherwise reconcile remaining attempts via existing VF CLI entrypoint (without --advance):
-        if wf_id and op_id:
-            recover_cmd = [
-                str(VF_PYTHON),
-                "-m", "video_factory.cli", "recover-keyframe",
-                wf_id,
-                "--operation-id", op_id,
-                "--provider-mode", provider_mode,
-                "--db-path", str(db_path),
-            ]
+                # 1. Check keyframe operation
+                kf_row = conn.execute(
+                    """SELECT workflow_id, status, error_code, provider_operation_id, provider_metadata_json
+                       FROM video_factory_keyframe_operation
+                       WHERE operation_id=? AND provider_kind='google_flow'""",
+                    (op_id,),
+                ).fetchone()
 
-            vf_env = os.environ.copy()
-            vf_env["PYTHONIOENCODING"] = "utf-8"
-            vf_env["HERMES_VIDEO_FACTORY_WORKSPACE"] = str(VF_WORKSPACE_DIR)
-            vf_env["HERMES_EXCHANGE_INBOX"] = str(INBOX_ROOT)
-            vf_env["VIDEO_FACTORY_HOME"] = str(VF_RUNTIME_DIR)
-            vf_env["HERMES_HOME"] = str(VF_RUNTIME_DIR)
-            vf_env["HERMES_APPROVAL_DB_PATH"] = str(db_path)
-            vf_env["HERMES_VIDEO_FACTORY_DB_PATH"] = str(db_path)
-
-            try:
-                proc = subprocess.run(
-                    recover_cmd,
-                    cwd=str(VF_DIR),
-                    capture_output=True,
-                    text=True,
-                    encoding="utf-8",
-                    errors="replace",
-                    env=vf_env,
-                    timeout=remaining_time,
-                )
-                child_stdout = (proc.stdout or "").strip()
-                child_stderr = (proc.stderr or "").strip()
-                logger.info("recover-keyframe exit code=%s for workflow=%s operation=%s: %s", proc.returncode, wf_id, op_id, child_stdout)
-                if proc.returncode != 0:
-                    logger.warning("recover-keyframe child failed with code %s: %s", proc.returncode, child_stderr)
-                else:
+                if kf_row is not None:
+                    status = kf_row["status"]
+                    err_code = str(kf_row["error_code"] or "")
+                    wf_id = kf_row["workflow_id"]
+                    meta = {}
                     try:
-                        child_result = json.loads(child_stdout)
-                        logger.info("recover-keyframe child result: %s", child_result)
+                        meta = json.loads(kf_row["provider_metadata_json"] or "{}")
                     except Exception:
                         pass
-            except subprocess.TimeoutExpired:
-                logger.warning("recover-keyframe VF subprocess timed out after %.1fs", remaining_time)
-                return False
-            except Exception as exc:
-                logger.warning("recover-keyframe VF subprocess error: %s", exc)
+                    finished_attempts = int(meta.get("output_reconciliation_finished_attempt") or 0)
 
-        return True
+                    if status != "unknown":
+                        continue
+
+                    # Worker has stopped and lease has expired.
+                    # If reconciliation already exhausted in previous worker, release slot for next product
+                    # without reopening the failed product in the same run.
+                    if finished_attempts >= 3 or err_code == "OUTPUT_RECONCILIATION_EXHAUSTED":
+                        from video_factory.integrations.capacity import ProviderCapacityStore
+                        from video_factory.workflows.runtime_control import ensure_pipeline_pause
+                        ProviderCapacityStore(conn).release_exhausted_reconciliation_slot(
+                            provider_kind="google_flow",
+                            operation_id=op_id,
+                        )
+                        ensure_pipeline_pause(conn)
+                        return True
+
+                    # Otherwise reconcile remaining attempts via existing VF CLI entrypoint (without --advance):
+                    if wf_id and op_id:
+                        recover_cmd = [
+                            str(VF_PYTHON),
+                            "-m", "video_factory.cli", "recover-keyframe",
+                            wf_id,
+                            "--operation-id", op_id,
+                            "--provider-mode", provider_mode,
+                            "--db-path", str(db_path),
+                        ]
+
+                        vf_env = os.environ.copy()
+                        vf_env["PYTHONIOENCODING"] = "utf-8"
+                        vf_env["HERMES_VIDEO_FACTORY_WORKSPACE"] = str(VF_WORKSPACE_DIR)
+                        vf_env["HERMES_EXCHANGE_INBOX"] = str(INBOX_ROOT)
+                        vf_env["VIDEO_FACTORY_HOME"] = str(VF_RUNTIME_DIR)
+                        vf_env["HERMES_HOME"] = str(VF_RUNTIME_DIR)
+                        vf_env["HERMES_APPROVAL_DB_PATH"] = str(db_path)
+                        vf_env["HERMES_VIDEO_FACTORY_DB_PATH"] = str(db_path)
+
+                        try:
+                            proc = subprocess.run(
+                                recover_cmd,
+                                cwd=str(VF_DIR),
+                                capture_output=True,
+                                text=True,
+                                encoding="utf-8",
+                                errors="replace",
+                                env=vf_env,
+                                timeout=remaining_time,
+                            )
+                            child_stdout = (proc.stdout or "").strip()
+                            child_stderr = (proc.stderr or "").strip()
+                            logger.info("recover-keyframe exit code=%s for workflow=%s operation=%s: %s", proc.returncode, wf_id, op_id, child_stdout)
+                            if proc.returncode != 0:
+                                logger.warning("recover-keyframe child failed with code %s: %s", proc.returncode, child_stderr)
+                            else:
+                                try:
+                                    child_result = json.loads(child_stdout)
+                                    logger.info("recover-keyframe child result: %s", child_result)
+                                except Exception:
+                                    pass
+                        except subprocess.TimeoutExpired:
+                            logger.warning("recover-keyframe VF subprocess timed out after %.1fs", remaining_time)
+                            return False
+                        except Exception as exc:
+                            logger.warning("recover-keyframe VF subprocess error: %s", exc)
+
+                        return True
+                    continue
+
+                # 2. Check scene operation
+                scene_row = conn.execute(
+                    """SELECT operation_id, owner_user_id, project_id, scene_id, render_batch_id,
+                              status, error_code, provider_operation_id, output_path, output_sha256,
+                              submitted_at, updated_at, request_json
+                       FROM video_factory_scene_operation
+                       WHERE operation_id=? AND provider_kind='google_flow'""",
+                    (op_id,),
+                ).fetchone()
+
+                if scene_row is not None:
+                    scene_status = scene_row["status"]
+                    scene_prov_op = scene_row["provider_operation_id"] or prov_op_id
+                    if scene_status in ("completed", "cancelled", "canceled", "abandoned_unknown"):
+                        from video_factory.integrations.capacity import ProviderCapacityStore
+                        ProviderCapacityStore(conn).release_exhausted_reconciliation_slot(
+                            provider_kind="google_flow",
+                            operation_id=op_id,
+                        )
+                        continue
+
+                    # Calculate age since submitted_at or updated_at
+                    ts_raw = scene_row["submitted_at"] or scene_row["updated_at"]
+                    age_seconds = 0.0
+                    if ts_raw:
+                        try:
+                            from datetime import timezone
+                            ts_cleaned = str(ts_raw).replace("Z", "+00:00")
+                            if "T" not in ts_cleaned:
+                                dt = datetime.fromisoformat(ts_cleaned + "+00:00" if "+" not in ts_cleaned else ts_cleaned)
+                            else:
+                                dt = datetime.fromisoformat(ts_cleaned)
+                            if dt.tzinfo is None:
+                                dt = dt.replace(tzinfo=timezone.utc)
+                            age_seconds = (datetime.now(timezone.utc) - dt).total_seconds()
+                        except Exception:
+                            age_seconds = FLOW_CLIP_ORPHAN_TIMEOUT_SECONDS + 1.0
+                    else:
+                        age_seconds = FLOW_CLIP_ORPHAN_TIMEOUT_SECONDS + 1.0
+
+                    # If orphaned clip is younger than timeout threshold, allow next product (B) to wait
+                    # for the remaining time (up to FLOW_CLIP_ORPHAN_TIMEOUT_SECONDS, once per daily run)
+                    if age_seconds < FLOW_CLIP_ORPHAN_TIMEOUT_SECONDS:
+                        if op_id not in _FLOW_ORPHAN_WAITED_OPS:
+                            rem_orphan = FLOW_CLIP_ORPHAN_TIMEOUT_SECONDS - age_seconds
+                            sleep_time = max(0.0, min(rem_orphan, FLOW_CLIP_ORPHAN_TIMEOUT_SECONDS))
+                            if sleep_time > 0:
+                                logger.info(
+                                    "Waiting %.1fs for orphaned Flow clip %s to reach timeout threshold (%ss)",
+                                    sleep_time, op_id, FLOW_CLIP_ORPHAN_TIMEOUT_SECONDS,
+                                )
+                                time.sleep(sleep_time)
+                                age_seconds += sleep_time
+                            _FLOW_ORPHAN_WAITED_OPS.add(op_id)
+
+                    if age_seconds < FLOW_CLIP_ORPHAN_TIMEOUT_SECONDS:
+                        continue
+
+                    # Read-only check on old project via isolated child process before marking abandoned_unknown
+                    output_found = False
+                    is_infra_error = False
+                    if scene_prov_op:
+                        probe_script = (
+                            "import sys, json, sqlite3\n"
+                            "from pathlib import Path\n"
+                            "db_path, op_id, prov_op_id = sys.argv[1], sys.argv[2], sys.argv[3]\n"
+                            "try:\n"
+                            "    from video_factory.integrations.server import _video_provider\n"
+                            "    prov_dict = _video_provider()\n"
+                            "    prov = prov_dict.get('google_flow') if isinstance(prov_dict, dict) else prov_dict\n"
+                            "    if not prov or not hasattr(prov, 'get_status'):\n"
+                            "        print(json.dumps({'outcome': 'infra_error', 'error': 'Google Flow video provider unavailable'}))\n"
+                            "        sys.exit(0)\n"
+                            "    sub_res = prov.get_status(prov_op_id)\n"
+                            "    st = getattr(sub_res, 'status', None)\n"
+                            "    vpath_str = getattr(sub_res, 'video_path', None)\n"
+                            "    if st == 'completed' and vpath_str:\n"
+                            "        vpath = Path(vpath_str)\n"
+                            "        if vpath.is_file() and vpath.stat().st_size > 0:\n"
+                            "            with sqlite3.connect(db_path) as conn:\n"
+                            "                from video_factory.integrations.scene_renderer import SceneRenderOperationStore\n"
+                            "                op_store = SceneRenderOperationStore(conn)\n"
+                            "                op_store.finalize_provider_result(op_id, sub_res)\n"
+                            "            print(json.dumps({'outcome': 'completed', 'video_path': str(vpath)}))\n"
+                            "            sys.exit(0)\n"
+                            "    err_code = str(getattr(sub_res, 'error_code', '') or '')\n"
+                            "    err_msg = str(getattr(sub_res, 'error_message', '') or '')\n"
+                            "    infra_markers = ('profile_busy', 'profile busy', 'auth_required', 'auth required', 'browser_disconnect', 'target closed', 'timeout', 'launch', 'crash')\n"
+                            "    combined_err = f'{err_code} {err_msg}'.lower()\n"
+                            "    if any(m in combined_err for m in infra_markers):\n"
+                            "        print(json.dumps({'outcome': 'infra_error', 'error_code': err_code, 'error': err_msg}))\n"
+                            "        sys.exit(0)\n"
+                            "    print(json.dumps({'outcome': 'no_output', 'status': st, 'error_code': err_code, 'error': err_msg}))\n"
+                            "    sys.exit(0)\n"
+                            "except Exception as exc:\n"
+                            "    print(json.dumps({'outcome': 'infra_error', 'error': str(exc), 'exc_type': type(exc).__name__}))\n"
+                            "    sys.exit(0)\n"
+                        )
+
+                        vf_env = os.environ.copy()
+                        vf_env["PYTHONIOENCODING"] = "utf-8"
+                        vf_env["HERMES_VIDEO_FACTORY_WORKSPACE"] = str(VF_WORKSPACE_DIR)
+                        vf_env["HERMES_EXCHANGE_INBOX"] = str(INBOX_ROOT)
+                        vf_env["VIDEO_FACTORY_HOME"] = str(VF_RUNTIME_DIR)
+                        vf_env["HERMES_HOME"] = str(VF_RUNTIME_DIR)
+                        vf_env["HERMES_APPROVAL_DB_PATH"] = str(db_path)
+                        vf_env["HERMES_VIDEO_FACTORY_DB_PATH"] = str(db_path)
+
+                        try:
+                            probe_proc = subprocess.run(
+                                [str(VF_PYTHON), "-c", probe_script, str(db_path), op_id, scene_prov_op],
+                                cwd=str(VF_DIR),
+                                capture_output=True,
+                                text=True,
+                                encoding="utf-8",
+                                errors="replace",
+                                env=vf_env,
+                                timeout=FLOW_PROBE_TIMEOUT_SECONDS,
+                            )
+                            if probe_proc.returncode != 0:
+                                logger.warning(
+                                    "Read-only probe on Flow scene %s exited with code %s: %s; retaining slot (fail-closed)",
+                                    op_id, probe_proc.returncode, probe_proc.stderr,
+                                )
+                                is_infra_error = True
+                            else:
+                                raw_out = (probe_proc.stdout or "").strip()
+                                try:
+                                    probe_data = json.loads(raw_out)
+                                    outcome = probe_data.get("outcome")
+                                    if outcome == "completed":
+                                        output_found = True
+                                        logger.info(
+                                            "Read-only probe found completed clip for Flow scene %s: %s",
+                                            op_id, probe_data.get("video_path"),
+                                        )
+                                    elif outcome == "infra_error":
+                                        logger.warning(
+                                            "Read-only probe on Flow scene %s encountered infra error (%s): %s; retaining slot (fail-closed)",
+                                            op_id, probe_data.get("error_code"), probe_data.get("error"),
+                                        )
+                                        is_infra_error = True
+                                    else:
+                                        logger.info("Read-only probe confirmed no output for Flow scene %s: %s", op_id, probe_data)
+                                except Exception as json_err:
+                                    logger.warning(
+                                        "Failed to parse probe JSON output for Flow scene %s: %s (%s); fail-closed",
+                                        op_id, raw_out, json_err,
+                                    )
+                                    is_infra_error = True
+                        except subprocess.TimeoutExpired:
+                            logger.warning("Read-only probe child on Flow scene %s timed out; retaining slot (fail-closed)", op_id)
+                            is_infra_error = True
+                        except Exception as exc:
+                            logger.warning("Read-only probe error on Flow scene %s: %s; retaining slot (fail-closed)", op_id, exc)
+                            is_infra_error = True
+
+                    # Fail-closed guard: do not abandon or release if an infra error occurred during status check
+                    if is_infra_error:
+                        continue
+
+                    if output_found:
+                        if run_result is not None:
+                            _record_scene_recovered_outcome(conn, db_path, op_id, scene_row, run_result)
+
+                    if not output_found:
+                        err_msg = f"Flow clip output not retrieved after {int(FLOW_CLIP_ORPHAN_TIMEOUT_SECONDS)}s timeout; op={op_id}, prov_op={scene_prov_op}"
+                        with conn:
+                            conn.execute(
+                                """UPDATE video_factory_scene_operation
+                                   SET status='abandoned_unknown',
+                                       error_code='CLIP_OUTPUT_NOT_RETRIEVED',
+                                       error_message=?,
+                                       updated_at=CURRENT_TIMESTAMP
+                                   WHERE operation_id=?""",
+                                (err_msg, op_id),
+                            )
+
+                        if run_result is not None:
+                            _record_scene_abandoned_outcome(conn, db_path, op_id, scene_row, err_msg, run_result)
+
+                    from video_factory.integrations.capacity import ProviderCapacityStore
+                    from video_factory.workflows.runtime_control import ensure_pipeline_pause
+                    ProviderCapacityStore(conn).release_exhausted_reconciliation_slot(
+                        provider_kind="google_flow",
+                        operation_id=op_id,
+                    )
+                    ensure_pipeline_pause(conn)
+                    return True
+
+        return False
     except Exception as exc:
-        logger.warning("Failed to recover stale Flow keyframe session: %s", exc)
+        logger.warning("Failed to recover stale Flow session: %s", exc)
         return False
 
 
