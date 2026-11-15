@@ -29,8 +29,9 @@ _AMBIGUOUS_VARIANT = re.compile(r"\b\d+\s*[a-zA-Z]*\s*/\s*\d+", re.IGNORECASE)
 _URL_LIKE_NAME = re.compile(r"^[^\s/]+\.[a-z]{2,}(?:\.[a-z]{2,})?/", re.IGNORECASE)
 _PRICE_LIKE_MODEL = re.compile(r"^\d+(?:[.,]\d+)?\s*(?:k|tr|đ|vnd)$", re.IGNORECASE)
 _PROMOTIONAL_NOISE_MODEL = re.compile(
-    r"^(?:sale|top|giam|giảm|hot|deal|combo|freeship|chinh\s*hang|chính\s*hãng)\b|\b\d+\s*%"
-    r"|^[^\w\s]+|\b(?!2k\b|4k\b|8k\b)\d+\s*(?:k|tr|đ|vnd|usd)\b",
+    r"^(?:sale|top|giam|giảm|hot|deal|combo|freeship|chinh\s*hang|chính\s*hãng)\b|"
+    r"\b\d+\s*%(?!\s*(?:thịt|tôm|cá|gà|bò|heo|lợn|hạt|đạm|nước|cốt|trái\s*cây|hoa\s*quả|nguyên\s*chất|bơ|sữa|mật\s*ong))\b|"
+    r"^[^\w\s]+|\b(?!2k\b|4k\b|8k\b)\d+\s*(?:k|tr|đ|vnd|usd)\b",
     re.IGNORECASE,
 )
 _RANKING_LIST_PATTERN = re.compile(r"^top\s*\d+\b", re.IGNORECASE)

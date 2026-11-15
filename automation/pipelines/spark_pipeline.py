@@ -50,6 +50,16 @@ FLOW_PROBE_TIMEOUT_SECONDS = float(os.getenv("VF_FLOW_PROBE_TIMEOUT_SECONDS", "6
 _FLOW_ORPHAN_WAITED_OPS: set[str] = set()
 
 
+def _connect_ro_or_timeout(db_path: Path, timeout: float = 30.0) -> sqlite3.Connection:
+    """Connect to SQLite in read-only mode, falling back to standard connection if WAL/SHM locks on Windows."""
+    try:
+        conn = sqlite3.connect(f"file:{db_path.as_posix()}?mode=ro", uri=True)
+    except (sqlite3.OperationalError, sqlite3.DatabaseError):
+        conn = sqlite3.connect(str(db_path), timeout=timeout)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
 @dataclass
 class VideoProbeResult:
     file_path: str
@@ -339,8 +349,7 @@ def _inspect_run_workflows(
 
     conn = None
     try:
-        conn = sqlite3.connect(f"file:{db_path.as_posix()}?mode=ro", uri=True)
-        conn.row_factory = sqlite3.Row
+        conn = _connect_ro_or_timeout(db_path)
 
         selection_id = "pv-creative-batch-" + hashlib.sha256(effective_run_id.encode()).hexdigest()[:24]
         row = conn.execute("SELECT aggregate_json FROM workflow WHERE workflow_id = ?", (selection_id,)).fetchone()
@@ -563,7 +572,7 @@ def _saved_run_qc_level(db_path: Path, run_id: str) -> str:
     if not db_path.is_file():
         raise ValueError('Cannot resume QC policy: saved workflow database is missing')
     selection_id = 'pv-creative-batch-' + hashlib.sha256(run_id.encode()).hexdigest()[:24]
-    with sqlite3.connect(f'file:{db_path.as_posix()}?mode=ro', uri=True) as conn:
+    with closing(_connect_ro_or_timeout(db_path)) as conn:
         row = conn.execute('SELECT aggregate_json FROM workflow WHERE workflow_id=?', (selection_id,)).fetchone()
         if row is None:
             raise ValueError('Cannot resume QC policy: saved creative batch is missing')
@@ -780,7 +789,7 @@ def _pin_sheet_batches(result, run_dir, db_path, qc_level):
             if db_path.is_file():
                 current_paths = {str(Path(entry["batch_path"]).resolve()): entry for entry in batches
                                  if isinstance(entry, dict) and entry.get("batch_path")}
-                with closing(sqlite3.connect(db_path.as_uri() + "?mode=ro", uri=True)) as conn:
+                with closing(_connect_ro_or_timeout(db_path)) as conn:
                     if conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='workflow'").fetchone():
                         for workflow_id, raw in conn.execute(
                             "SELECT workflow_id, aggregate_json FROM workflow "
@@ -823,7 +832,7 @@ def _sheet_video_slots(db_path: Path, day: str) -> set[str]:
 
     if not db_path.is_file():
         return set()
-    with closing(sqlite3.connect(db_path.as_uri() + "?mode=ro", uri=True)) as conn:
+    with closing(_connect_ro_or_timeout(db_path)) as conn:
         if not conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='workflow'").fetchone():
             return set()
         rows = conn.execute(
@@ -907,7 +916,7 @@ def _run_sheet_batches(result, batches, db_path, tuned_profile, run_dir, profile
             if not item_pk:
                 if item_wf and db_path.is_file():
                     try:
-                        with closing(sqlite3.connect(f"file:{db_path.as_posix()}?mode=ro", uri=True)) as conn:
+                        with closing(_connect_ro_or_timeout(db_path)) as conn:
                             row = conn.execute("SELECT aggregate_json FROM workflow WHERE workflow_id = ?", (item_wf,)).fetchone()
                             if row:
                                 agg = json.loads(row[0])
@@ -994,7 +1003,7 @@ def _can_product_bypass_flow_wait(db_path: Path, product_key: str) -> bool:
         has_vf_guard = False
 
     try:
-        with closing(sqlite3.connect(f"file:{db_path.as_posix()}?mode=ro", uri=True)) as conn:
+        with closing(_connect_ro_or_timeout(db_path)) as conn:
             conn.row_factory = sqlite3.Row
             tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
             if "workflow" not in tables:
