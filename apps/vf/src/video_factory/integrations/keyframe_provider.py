@@ -651,7 +651,10 @@ class KeyframeRuntime:
                         metadata=meta,
                     )
                 finished_attempts = int(meta.get("output_reconciliation_finished_attempt") or 0)
-                polls_exhausted = finished_attempts >= MAX_OUTPUT_RECONCILIATION_ATTEMPTS
+                polls_exhausted = (
+                    finished_attempts >= MAX_OUTPUT_RECONCILIATION_ATTEMPTS
+                    or err_code == "OUTPUT_RECONCILIATION_EXHAUSTED"
+                )
                 if polls_exhausted:
                     return KeyframeGenerationResult(
                         operation_id=request.operation_id,

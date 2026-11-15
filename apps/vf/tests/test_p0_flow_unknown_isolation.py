@@ -1100,9 +1100,9 @@ def test_p0_capacity_pause_unpauses_when_unknown_slot_released(tmp_path):
 
     conn.close()
 
-def test_p0_operator_can_replace_frame_after_single_attempt_timeout(tmp_path):
+def test_p0_operator_cannot_replace_frame_before_exhaustion_and_can_replace_when_exhausted(tmp_path):
 
-    """P0 Issue 3: Operator can replace keyframe after a single reconciliation attempt times out."""
+    """Operator is rejected when finished_attempts < 3 and error_code is GOOGLE_FLOW_KEYFRAME_TIMEOUT; allowed when exhausted."""
 
     import sys
 
@@ -1182,8 +1182,6 @@ def test_p0_operator_can_replace_frame_after_single_attempt_timeout(tmp_path):
 
         conn.execute("UPDATE video_factory_provider_capacity SET lease_expires_at=0")
 
-    # Operator replaces the frame even though attempts == 1 (< 3)
-
     kwargs = dict(
 
         workflow_id=wf, owner_user_id=owner, operation_id=req.operation_id,
@@ -1191,6 +1189,19 @@ def test_p0_operator_can_replace_frame_after_single_attempt_timeout(tmp_path):
         replacement_note="Operator replaced frame after first reconciliation attempt timed out.",
 
     )
+
+    # 1. Operator is rejected because finished_attempts < 3
+    with pytest.raises(ValueError, match="An unknown Flow operation with no output and an exhausted poll budget is required"):
+        recover_unknown_keyframe_submission(conn, **kwargs)
+
+    # 2. Operator is allowed when poll budget is exhausted (finished_attempts >= 3 or OUTPUT_RECONCILIATION_EXHAUSTED)
+    store.save_result(req, KeyframeGenerationResult(
+        req.operation_id, "unknown", provider_operation_id=url,
+        error_code="OUTPUT_RECONCILIATION_EXHAUSTED",
+        error_message="Flow post-Send timeout after 3 attempts",
+        metadata={"provider_kind": "google_flow", "project_url": url, "send_attempted": True,
+                  "output_reconciliation_attempts": 3, "output_reconciliation_finished_attempt": 3},
+    ))
 
     result = recover_unknown_keyframe_submission(conn, **kwargs)
 

@@ -2456,7 +2456,10 @@ class ProductVideoCoordinator:
                             'GOOGLE_FLOW_PROJECT_ACCESS_FAILED', 'GOOGLE_FLOW_PROFILE_UNAVAILABLE',
                             'GOOGLE_FLOW_PROFILE_BUSY',
                         )
-                        polls_exhausted = (finished_attempts >= 3)
+                        polls_exhausted = (
+                            finished_attempts >= 3
+                            or err_code == "OUTPUT_RECONCILIATION_EXHAUSTED"
+                        )
                         if not polls_exhausted and int(current.get('keyframe_recovery_attempt', 0) or 0) < 1:
                             if err_code not in non_reconcilable_errors:
                                 return {'workflow_id': workflow_id, 'state': current['state'], 'action': 'worker_tick'}
@@ -2539,7 +2542,10 @@ class ProductVideoCoordinator:
                 'operation_id': op_row['operation_id'],
             }
 
-        polls_exhausted = (finished_attempts >= 3)
+        polls_exhausted = (
+            finished_attempts >= 3
+            or err_code == "OUTPUT_RECONCILIATION_EXHAUSTED"
+        )
         if not polls_exhausted:
             from video_factory.workflows.outbox_repository import OutboxRepository
             with self.connection:
