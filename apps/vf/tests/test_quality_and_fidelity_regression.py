@@ -300,7 +300,7 @@ def test_prompt_compilers_enforce_identity_and_forbidden_regions() -> None:
         assert "front glossy LED display screen" in kf_prompt
         assert "Immutable identity cues:" in kf_prompt
         assert "Interaction geometry:" in kf_prompt
-        assert "cable entering forbidden region" in KEYFRAME_NEGATIVE_PROMPT
+        assert "promotional text" in KEYFRAME_NEGATIVE_PROMPT
 
         kf_path = Path(tmp) / "kf1.png"
         Image.new("RGB", (720, 1280), color="purple").save(kf_path)

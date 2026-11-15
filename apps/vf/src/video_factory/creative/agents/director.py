@@ -256,6 +256,8 @@ class VisualDirector:
                 'START depicts only the initial instant and objects supported by the selected source. '
                 'After the required action sentence, describe only necessary motion and the exact visible inventory. '
                 'Preserve each required object, its count, silhouette and visibility from START through the last frame. '
+                'FOOD FORM AND TEXTURE LOCK: Depict the food in exactly the physical form shown by the selected reference: the same cut or piece size (whole, sliced, shredded, chunked), the same surface (glazed, sugar-coated, dry, sticky, crumbly), the same color and coating, and the same piece count. Never swap it for a more familiar variant of the same ingredient (a glazed sliced snack must not become a whole dried one). In close-up and texture scenes keep the same preparation state as the reference. If the reference does not show the inside or a cross-section, do not invent one; show only the visible surface. '
+                'CLEAN FRAME: The frame contains no added text of any kind: no captions, subtitles, prices, badges, logos, watermarks, shop names, social handles or interface elements. The only readable lettering is what is physically printed on the product package or label seen in the reference, and only on that package. Walls, surfaces and tableware are plain and unbranded. The shot is silent with no on-screen graphics. '
                 'Keep margin around the entire required silhouette, including the serving bowl rim when required. '
                 'If START shows a unit, never prompt for another unit to enter or overlap it. '
                 'Keep physical targets separated and identify the exact contact or pour destination. '

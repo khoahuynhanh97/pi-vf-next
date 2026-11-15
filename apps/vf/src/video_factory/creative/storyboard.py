@@ -17,10 +17,12 @@ KEYFRAME_NEGATIVE_PROMPT = (
     "seller or shop branding, source watermark, marketplace UI, price badge, rating badge, "
     "social handle, shipping label, unrelated logo, copied product-listing layout, malformed text, "
     "wrong brand, wrong model, wrong variant, changed color, changed material, changed logo, "
-    "changed product shape, distorted geometry, duplicate product, duplicated product, extra product, "
-    "floating object, missing control, missing identity detail, cropped identity detail, extra limbs, "
-    "cable entering screen, cable entering forbidden region, wrong port placement, wrong display shape, "
-    "wrong control placement, black bars, letterboxing, square composition"
+    "changed product shape, morphing product, distorted geometry, duplicate product, duplicated product, "
+    "extra product, floating object, missing identity detail, cropped identity detail, extra limbs, "
+    "malformed fingers, black bars, letterboxing, square composition, blurry, low quality, "
+    "promotional text, banner text, sale badge, price tag, discount badge, store watermark, seller logo, "
+    "marketplace interface, floating letters, non-packaging text, altered piece shape, altered surface texture, "
+    "wrong coating color, wrong piece count, duplicated pieces, extra product package"
 )
 
 
