@@ -586,6 +586,11 @@ def _publish_root_intake(run_dir: Path, inbox_root: Path, batch_id: str | None,
         creative = {"kind":"creative-input-v1", "candidate_id":row.get("candidate_id"),
             "csv_sha256":state["selection_csv_sha256"],
             **{k:row.get("input_metadata",{}).get(k, "") for k in ("video_concept","script_draft","claims_to_verify","source_refs_json")}}
+        rev = product.get("review") or {}
+        if isinstance(rev, dict) and rev.get("visual_potential"):
+            creative["visual_potential"] = rev["visual_potential"]
+            if not creative.get("video_concept") and rev["visual_potential"].get("viral_hook"):
+                creative["video_concept"] = rev["visual_potential"]["viral_hook"]
         source_snapshot = {
             "canonical_product_id": canonical,
             "product": {
