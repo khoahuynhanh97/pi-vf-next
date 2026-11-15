@@ -212,19 +212,23 @@ def normalize_sources(sources: list[tuple[str, Path]], previous_pool: Path | Non
         elif previous and previous.get("state") == "NEEDS_REVIEW" and row["state"] == "OPEN":
             row["state"] = "NEEDS_REVIEW"
     if previous_pool:
-        for handoff_path in previous_pool.parent.glob("*/handoff.json"):
-            try:
-                ready_dir = handoff_path.parent
-                if not (ready_dir / "READY").is_file(): continue
-                handoff = read_json(handoff_path); selected_file = ready_dir / handoff["csv_file"]
-                if digest(selected_file) != handoff["csv_sha256"]: continue
-                with selected_file.open(encoding="utf-8-sig", newline="") as stream:
-                    for selected in csv.DictReader(stream):
-                        current = next((x for x in rows if x["candidate_id"] == selected["candidate_id"]), None)
-                        if current and current["state"] not in ("HANDED_OFF", "NEEDS_REVIEW"):
-                            current.update(state="SELECTED", selected_batch_id=handoff["batch_id"], selection_reason=selected["selection_reason"])
-            except (OSError, ValueError, KeyError, TypeError):
-                continue
+        batch_dirs = [previous_pool.parent]
+        if (previous_pool.parent / "selection_batches").is_dir():
+            batch_dirs.append(previous_pool.parent / "selection_batches")
+        for b_dir in batch_dirs:
+            for handoff_path in b_dir.glob("*/handoff.json"):
+                try:
+                    ready_dir = handoff_path.parent
+                    if not (ready_dir / "READY").is_file(): continue
+                    handoff = read_json(handoff_path); selected_file = ready_dir / handoff["csv_file"]
+                    if digest(selected_file) != handoff["csv_sha256"]: continue
+                    with selected_file.open(encoding="utf-8-sig", newline="") as stream:
+                        for selected in csv.DictReader(stream):
+                            current = next((x for x in rows if x["candidate_id"] == selected["candidate_id"]), None)
+                            if current and current["state"] not in ("HANDED_OFF", "NEEDS_REVIEW"):
+                                current.update(state="SELECTED", selected_batch_id=handoff["batch_id"], selection_reason=selected["selection_reason"])
+                except (OSError, ValueError, KeyError, TypeError):
+                    continue
     return rows
 
 def write_pool(path: Path, rows: list[dict]) -> None:
