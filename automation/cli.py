@@ -395,6 +395,33 @@ def cmd_dashboard(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_voiceover(args: argparse.Namespace) -> int:
+    from video_factory.application.voiceover import create_voiceover, draft_voiceover
+
+    try:
+        root = VF_WORKSPACE_DIR / 'voiceovers'
+        if args.draft:
+            print(draft_voiceover(args.export_dir, root, notes_path=args.scene_notes))
+        else:
+            print(create_voiceover(args.export_dir, root, script_path=args.script).video_path)
+    except (OSError, ValueError, RuntimeError) as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+    return 0
+
+
+def cmd_affiliate_qc(args: argparse.Namespace) -> int:
+    from video_factory.qc.affiliate import review_affiliate_export
+
+    try:
+        path, report = review_affiliate_export(args.export_dir, VF_WORKSPACE_DIR)
+    except (OSError, ValueError, KeyError, TypeError, AttributeError) as exc:
+        print(f'Không kiểm được MP4 cuối: {exc}', file=sys.stderr)
+        return 1
+    print(json.dumps({'report_path': str(path), **report}, ensure_ascii=False, indent=2))
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="pi-vf-automation",
@@ -486,7 +513,21 @@ def main(argv: list[str] | None = None) -> int:
     p_dashboard.add_argument("--port", type=int, default=8080, help="Port to listen (default: 8080)")
     p_dashboard.set_defaults(func=cmd_dashboard)
 
+    p_voice = subparsers.add_parser('voiceover', help='Add Vietnamese narration to a verified export')
+    p_voice.add_argument('export_dir', type=Path)
+    voice_mode = p_voice.add_mutually_exclusive_group(required=True)
+    voice_mode.add_argument('--draft', action='store_true')
+    voice_mode.add_argument('--script', type=Path)
+    p_voice.add_argument('--scene-notes', type=Path)
+    p_voice.set_defaults(func=cmd_voiceover)
+
+    p_affiliate = subparsers.add_parser('affiliate-qc', help='Score a final MP4 for affiliate posting')
+    p_affiliate.add_argument('export_dir', type=Path)
+    p_affiliate.set_defaults(func=cmd_affiliate_qc)
+
     args = parser.parse_args(argv)
+    if args.func is cmd_voiceover and args.scene_notes is not None and not args.draft:
+        p_voice.error('--scene-notes requires --draft')
     if args.func is cmd_compare_qc and not 0 <= args.threshold <= 100:
         p_compare.error("--threshold must be between 0 and 100")
     if hasattr(args, "provider_mode") and args.provider_mode is None:

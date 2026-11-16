@@ -26,6 +26,10 @@ DEFAULT_EXCHANGE_INBOX = Path(r"D:\work\hermes-data\product-intelligence-data\in
 FALLBACK_EXCHANGE_INBOX = Path(r"D:\work\hermes-agent-data\product-intelligence\inbox")
 LEGACY_EXCHANGE_INBOX = Path(r"D:\work\Personal\hermes-product-video-exchange\inbox")
 _AMBIGUOUS_VARIANT = re.compile(r"\b\d+\s*[a-zA-Z]*\s*/\s*\d+", re.IGNORECASE)
+_FOOD_WEIGHT_OR_PACKAGE = re.compile(
+    r"\b\d+\s*(?:g|gr|gram|kg|kilo|ml|l|lit|lít|hop|hộp|hu|hũ|tui|túi|goi|gói|lon|chai|mieng|miếng|vien|viên|combo|set)\s*/\s*\d+",
+    re.IGNORECASE,
+)
 _URL_LIKE_NAME = re.compile(r"^[^\s/]+\.[a-z]{2,}(?:\.[a-z]{2,})?/", re.IGNORECASE)
 _PRICE_LIKE_MODEL = re.compile(r"^\d+(?:[.,]\d+)?\s*(?:k|tr|đ|vnd)$", re.IGNORECASE)
 _PROMOTIONAL_NOISE_MODEL = re.compile(
@@ -301,8 +305,9 @@ class ExchangeImporter:
         if _PROMOTIONAL_NOISE_MODEL.search(product.model.strip()):
             return False, "product model contains promotional or ranking noise (e.g. Sale/Top/Deal/%)", []
 
-        if _AMBIGUOUS_VARIANT.search(product.name):
-            return False, "ambiguous product variant", []
+        if product.identity_mode != "source_product" and _AMBIGUOUS_VARIANT.search(product.name):
+            if not _FOOD_WEIGHT_OR_PACKAGE.search(product.name):
+                return False, "ambiguous product variant", []
 
         valid_imgs: list[dict[str, Any]] = []
         asset_id_counts: dict[str, int] = {}
@@ -544,9 +549,10 @@ def publish_daily_run_to_exchange(
                 master_repo.mark_rejected(canonical_key, "MISSING_REQUIRED_FIELDS")
                 continue
 
-            if _AMBIGUOUS_VARIANT.search(name):
-                master_repo.mark_rejected(canonical_key, "AMBIGUOUS_VARIANT")
-                continue
+            if identity_mode != "source_product" and _AMBIGUOUS_VARIANT.search(name):
+                if not _FOOD_WEIGHT_OR_PACKAGE.search(name):
+                    master_repo.mark_rejected(canonical_key, "AMBIGUOUS_VARIANT")
+                    continue
 
             if _URL_LIKE_NAME.match(name):
                 master_repo.mark_rejected(canonical_key, "URL_LIKE_NAME")

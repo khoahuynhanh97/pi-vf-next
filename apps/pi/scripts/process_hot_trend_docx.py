@@ -66,6 +66,10 @@ COMPREHENSIVE_BRANDS = [
 
 _PRICE_LIKE_MODEL = re.compile(r"^\d+([kK]|tr|tri[eệ]u|[.,]\d{3})", re.IGNORECASE)
 _AMBIGUOUS_VARIANT = re.compile(r"\b\d+\s*[a-zA-Z]*\s*/\s*\d+", re.IGNORECASE)
+_FOOD_WEIGHT_OR_PACKAGE = re.compile(
+    r"\b\d+\s*(?:g|gr|gram|kg|kilo|ml|l|lit|lít|hop|hộp|hu|hũ|tui|túi|goi|gói|lon|chai|mieng|miếng|vien|viên|combo|set)\s*/\s*\d+",
+    re.IGNORECASE,
+)
 
 COMMON_VIETNAMESE_PREFIXES = {
     "tai", "cáp", "bàn", "gậy", "giá", "máy", "kính", "quạt", "thước", "chuột",
@@ -319,7 +323,7 @@ def evaluate_admission(prod: dict[str, Any], valid_images: list[dict[str, Any]])
     model_words = _identity_words(model or "")
     if not model_words or _PRICE_LIKE_MODEL.match(str(model).strip()):
         return False, "PRICE_LIKE_MODEL"
-    if _AMBIGUOUS_VARIANT.search(name):
+    if _AMBIGUOUS_VARIANT.search(name) and not _FOOD_WEIGHT_OR_PACKAGE.search(name):
         return False, "AMBIGUOUS_VARIANT"
     if len(valid_images) < 2:
         return False, "INSUFFICIENT_IMAGES"

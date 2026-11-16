@@ -52,6 +52,10 @@ from video_factory.automation.repository import (
 )
 
 _AMBIGUOUS_VARIANT = re.compile(r"\b\d+\s*[a-zA-Z]*\s*/\s*\d+", re.IGNORECASE)
+_FOOD_WEIGHT_OR_PACKAGE = re.compile(
+    r"\b\d+\s*(?:g|gr|gram|kg|kilo|ml|l|lit|lít|hop|hộp|hu|hũ|tui|túi|goi|gói|lon|chai|mieng|miếng|vien|viên|combo|set)\s*/\s*\d+",
+    re.IGNORECASE,
+)
 
 
 @dataclass(frozen=True)
@@ -124,7 +128,7 @@ def _validate_product(product: dict[str, Any], batch_dir: Path) -> tuple[str, li
     name = str(product.get("name") or "").strip()
     if not name:
         raise ValueError("missing product name")
-    if _AMBIGUOUS_VARIANT.search(name):
+    if _AMBIGUOUS_VARIANT.search(name) and not _FOOD_WEIGHT_OR_PACKAGE.search(name):
         raise ValueError("ambiguous product variant")
     key = _product_key(product)
     images = _valid_images(product, batch_dir)

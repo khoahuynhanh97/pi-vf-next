@@ -35,7 +35,8 @@ KEYFRAME_NEGATIVE_PROMPT = (
     "malformed fingers, black bars, letterboxing, square composition, blurry, low quality, "
     "promotional text, banner text, sale badge, price tag, discount badge, store watermark, seller logo, "
     "marketplace interface, floating letters, non-packaging text, altered piece shape, altered surface texture, "
-    "wrong coating color, wrong piece count, duplicated pieces, extra product package"
+    "wrong coating color, wrong piece count, duplicated pieces, extra product package, "
+    "dry matte lifeless food, chalky surface, powdery finish, desiccated fruit, plastic artificial sheen"
 )
 
 

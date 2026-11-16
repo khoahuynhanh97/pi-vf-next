@@ -232,6 +232,12 @@ class VisualDirector:
             prompt += ('\nFor scripts with at least three scenes, bind an approved detail image to at least one '
                        'middle scene. Approved detail asset IDs: ' + ', '.join(sorted(detail_assets)) + '.')
         prompt += '\nAuthor placement, lighting, continuity_from_previous, continuity_to_next, identity cues, visible details, reference requirements, claim/asset IDs, and explicit END policy/omission reason in every scene. Missing intent is rejected, never filled by a generic template.'
+        prompt += ('\nPACKAGING AND WEIGHT AGNOSTIC: Completely ignore retail package formats (box, bag, jar, pouch) '
+                   'and weight or volume numbers (250g, 500g, 1kg). Focus 100% on the appetizing visual qualities of the food itself '
+                   '(presented on a clean plate, wooden cutting board, small ceramic bowl, or held by hand). '
+                   'For candied fruits, dried fruits (mứt, trái cây sấy dẻo/giòn), or foods coated in honey, syrup, sauce, or oil: '
+                   'feature mouthwatering close-ups highlighting the glossy sheen reflecting warm ambient light, rich translucent glaze, '
+                   'succulent chewy texture, and satisfying hands-on interaction (picking up a piece, breaking it apart to show texture).')
         if self.director_config_version == 'scene-bible-v1':
             prompt += (
                 '\nSCENE BIBLE REQUIREMENTS:\n'
@@ -257,6 +263,7 @@ class VisualDirector:
                 'After the required action sentence, describe only necessary motion and the exact visible inventory. '
                 'Preserve each required object, its count, silhouette and visibility from START through the last frame. '
                 'FOOD FORM AND TEXTURE LOCK: Depict the food in exactly the physical form shown by the selected reference: the same cut or piece size (whole, sliced, shredded, chunked), the same surface (glazed, sugar-coated, dry, sticky, crumbly), the same color and coating, and the same piece count. Never swap it for a more familiar variant of the same ingredient (a glazed sliced snack must not become a whole dried one). In close-up and texture scenes keep the same preparation state as the reference. If the reference does not show the inside or a cross-section, do not invent one; show only the visible surface. '
+                'APPETIZING GLOSS AND TEXTURE SPECIFICATION: For candied fruits, jams (mứt), dried fruits (trái cây sấy dẻo), or foods with honey, syrup, glaze, or sauce coating, describe the exterior surface as rich, glossy, and glistening under warm ambient light, with mouthwatering specular highlights. Highlight the succulent, chewy, or crispy food texture and natural appetizing colors. Do not render dull, dry, chalky, or lifeless food surfaces. '
                 'CLEAN FRAME: The frame contains no added text of any kind: no captions, subtitles, prices, badges, logos, watermarks, shop names, social handles or interface elements. The only readable lettering is what is physically printed on the product package or label seen in the reference, and only on that package. Walls, surfaces and tableware are plain and unbranded. The shot is silent with no on-screen graphics. '
                 'Keep margin around the entire required silhouette, including the serving bowl rim when required. '
                 'If START shows a unit, never prompt for another unit to enter or overlap it. '

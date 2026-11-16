@@ -157,6 +157,7 @@ def build_export_package(
     cta: str | None = None,
     provenance: Mapping[str, Any] | None = None,
     expected: VideoExpectation | None = None,
+    mirror_to_hub: bool = True,
 ) -> ExportPackage:
     """Create one immutable final.mp4/caption.txt/metadata.json package.
 
@@ -298,8 +299,10 @@ def build_export_package(
         )
         try:
             os.replace(stage, target)
-        except FileExistsError:
-            return _existing_package(target, expected_input_digest=input_digest)
+        except OSError:
+            if target.exists():
+                return _existing_package(target, expected_input_digest=input_digest)
+            raise
     finally:
         if stage.exists():
             shutil.rmtree(stage)
@@ -312,6 +315,8 @@ def build_export_package(
         video_sha256=probe.sha256,
         caption_sha256=caption_sha256,
     )
+    if not mirror_to_hub:
+        return package
     
     # Mirror to VideoAI Hub (fail-safe: never break core export on hub errors)
     try:
