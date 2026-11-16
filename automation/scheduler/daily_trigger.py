@@ -143,7 +143,7 @@ def trigger_daily_run(
     if spark_csv is None and not 1 <= limit <= DAILY_VIDEO_LIMIT:
         raise ValueError(f"Sheet limit must be between 1 and {DAILY_VIDEO_LIMIT}")
     sheet_intake = prepare_sheet_intake(target_date, limit, acquire=acquire) if spark_csv is None else None
-    if spark_csv is None and (not sheet_intake or sheet_intake.get("status") in ("error", "waiting") or not (sheet_intake or {}).get("exchange_batches")):
+    if spark_csv is None and (not sheet_intake or not (sheet_intake or {}).get("exchange_batches") or sheet_intake.get("status") == "error"):
         records = _load_ledger()
         prior_run = next(
             (rec for rec in reversed(records)
